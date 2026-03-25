@@ -21,6 +21,14 @@ function getNumber(key, fallback) {
 }
 
 // ============================================================================
+// Get environment variable as boolean with fallback
+// ============================================================================
+function getBoolean(key, fallback = false) {
+  const value = getEnv(key, String(fallback)).toLowerCase().trim();
+  return value === 'true' || value === '1' || value === 'yes' || value === 'on';
+}
+
+// ============================================================================
 // Configuration object with all application settings
 // ============================================================================
 const config = {
@@ -28,13 +36,13 @@ const config = {
   host: getEnv('HOST', '0.0.0.0'),
   socketCorsOrigin: getEnv('SOCKET_CORS_ORIGIN', '*'),
   logLevel: getEnv('LOG_LEVEL', 'info'),
-  cassandra: {
-    host: getEnv('CASSANDRA_HOST', '127.0.0.1'),
-    port: getNumber('CASSANDRA_PORT', 9043),
-    keyspace: getEnv('CASSANDRA_KEYSPACE', 'myapp'),
-    username: getEnv('CASSANDRA_USERNAME', ''),
-    password: getEnv('CASSANDRA_PASSWORD', ''),
-    datacenter: getEnv('CASSANDRA_LOCAL_DATACENTER', 'datacenter1')
+  mysql: {
+    host: getEnv('MYSQL_HOST', '127.0.0.1'),
+    port: getNumber('MYSQL_PORT', 3306),
+    database: getEnv('MYSQL_DATABASE', 'virtual_game'),
+    user: getEnv('MYSQL_USER', 'game_user'),
+    password: getEnv('MYSQL_PASSWORD', ''),
+    connectionLimit: getNumber('MYSQL_CONNECTION_LIMIT', 10)
   },
   serverPort: getNumber('SERVER_PORT', 3008),
   serverId: getEnv('SERVER_ID', '1'),
@@ -54,6 +62,9 @@ const config = {
       username: getEnv('REDIS_USERNAME', ''),
       password: getEnv('REDIS_PASSWORD', ''),
       db: getNumber('REDIS_DB', 0),
+      clusterMode: getBoolean('REDIS_CLUSTER_MODE', false),
+      clusterNodes: getEnv('REDIS_CLUSTER_NODES', ''),
+      tls: getBoolean('REDIS_TLS', false),
       poolSize: getNumber('REDIS_POOL_SIZE', 10),
       minIdle: getNumber('REDIS_MIN_IDLE_CONNS', 5)
     },
@@ -62,6 +73,9 @@ const config = {
       username: getEnv('REDIS_CACHE_USERNAME', ''),
       password: getEnv('REDIS_CACHE_PASSWORD', ''),
       db: getNumber('REDIS_CACHE_DB', 1),
+      clusterMode: getBoolean('REDIS_CACHE_CLUSTER_MODE', false),
+      clusterNodes: getEnv('REDIS_CACHE_CLUSTER_NODES', ''),
+      tls: getBoolean('REDIS_CACHE_TLS', false),
       poolSize: getNumber('REDIS_CACHE_POOL_SIZE', 5),
       minIdle: getNumber('REDIS_CACHE_MIN_IDLE_CONNS', 2)
     },
@@ -70,6 +84,9 @@ const config = {
       username: getEnv('REDIS_SESSION_USERNAME', ''),
       password: getEnv('REDIS_SESSION_PASSWORD', ''),
       db: getNumber('REDIS_SESSION_DB', 2),
+      clusterMode: getBoolean('REDIS_SESSION_CLUSTER_MODE', false),
+      clusterNodes: getEnv('REDIS_SESSION_CLUSTER_NODES', ''),
+      tls: getBoolean('REDIS_SESSION_TLS', false),
       poolSize: getNumber('REDIS_SESSION_POOL_SIZE', 3),
       minIdle: getNumber('REDIS_SESSION_MIN_IDLE_CONNS', 2)
     }

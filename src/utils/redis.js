@@ -5,14 +5,50 @@ const { toISOString } = require('./dateUtils');
 
 const DEFAULT_TIMEOUT = 3000;
 
-// ============================================================================
-// Build Redis connection options from config
-// ============================================================================
-function buildRedisOptions(cfg) {
-  const [host, port] = cfg.url.split(':');
+function parseHostPort(value, fallbackHost = '127.0.0.1', fallbackPort = 6379) {
+  if (!value) return { host: fallbackHost, port: fallbackPort };
+  const [host, port] = String(value).split(':');
+  return {
+    host: host || fallbackHost,
+    port: Number(port || fallbackPort)
+  };
+}
+
+function parseClusterNodes(rawNodes, fallbackUrl) {
+  const source = rawNodes && rawNodes.trim() !== '' ? rawNodes : fallbackUrl;
+  return String(source || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((node) => parseHostPort(node));
+}
+
+function isClusterClient(client) {
+  return client && typeof client.nodes === 'function';
+}
+
+async function scanSingleNode(node, pattern, count = 100) {
+  const keys = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, batch] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', count);
+    cursor = nextCursor;
+    keys.push(...batch);
+  } while (cursor !== '0');
+  return keys;
+}
+
+async function scanAcrossClient(client, pattern, count = 100) {
+  if (!isClusterClient(client)) {
+    return scanSingleNode(client, pattern, count);
+  }
+  const masters = client.nodes('master');
+  const results = await Promise.all(masters.map((node) => scanSingleNode(node, pattern, count)));
+  return [...new Set(results.flat())];
+}
+
+function baseRedisOptions(cfg) {
   const options = {
-    host: host || '127.0.0.1',
-    port: Number(port || 6379),
     password: cfg.password || undefined,
     db: cfg.db ?? 0,
     enableReadyCheck: true,
@@ -44,6 +80,48 @@ function buildRedisOptions(cfg) {
 }
 
 // ============================================================================
+// Build Redis connection options from config
+// ============================================================================
+function buildRedisOptions(cfg) {
+  const { host, port } = parseHostPort(cfg.url);
+  const options = {
+    ...baseRedisOptions(cfg),
+    host,
+    port
+  };
+  if (cfg.tls) options.tls = {};
+  return options;
+}
+
+function createRedisClient(cfg) {
+  if (cfg.clusterMode) {
+    const startupNodes = parseClusterNodes(cfg.clusterNodes, cfg.url);
+    const redisOptions = baseRedisOptions(cfg);
+    delete redisOptions.db;
+    if (cfg.tls) redisOptions.tls = {};
+    return new Redis.Cluster(startupNodes, {
+      dnsLookup: (address, callback) => callback(null, address),
+      redisOptions
+    });
+  }
+  return new Redis(buildRedisOptions(cfg));
+}
+
+async function closeRedisClient(client) {
+  if (!client) return;
+  if (typeof client.quit === 'function') {
+    try {
+      await client.quit();
+      return;
+    } catch (_) {
+    }
+  }
+  if (typeof client.disconnect === 'function') {
+    client.disconnect();
+  }
+}
+
+// ============================================================================
 // Get all Redis configurations
 // ============================================================================
 function getRedisConfigs() {
@@ -53,7 +131,10 @@ function getRedisConfigs() {
       url: config.redis.primary.url,
       username: config.redis.primary.username,
       password: config.redis.primary.password,
-      db: config.redis.primary.db
+      db: config.redis.primary.db,
+      clusterMode: config.redis.primary.clusterMode,
+      clusterNodes: config.redis.primary.clusterNodes,
+      tls: config.redis.primary.tls
     });
   }
   if (config.redis.cache.url) {
@@ -61,7 +142,10 @@ function getRedisConfigs() {
       url: config.redis.cache.url,
       username: config.redis.cache.username,
       password: config.redis.cache.password,
-      db: config.redis.cache.db
+      db: config.redis.cache.db,
+      clusterMode: config.redis.cache.clusterMode,
+      clusterNodes: config.redis.cache.clusterNodes,
+      tls: config.redis.cache.tls
     });
   }
   if (config.redis.session.url) {
@@ -69,7 +153,10 @@ function getRedisConfigs() {
       url: config.redis.session.url,
       username: config.redis.session.username,
       password: config.redis.session.password,
-      db: config.redis.session.db
+      db: config.redis.session.db,
+      clusterMode: config.redis.session.clusterMode,
+      clusterNodes: config.redis.session.clusterNodes,
+      tls: config.redis.session.tls
     });
   }
   return map;
@@ -89,7 +176,7 @@ class RedisService {
     names.forEach((name) => {
       const cfg = configs.get(name);
       if (cfg) {
-        this.clients.set(name, new Redis(buildRedisOptions(cfg)));
+        this.clients.set(name, createRedisClient(cfg));
       }
     });
     this.defaultClient = this.clients.has('default') ? 'default' : names[0];
@@ -107,14 +194,14 @@ class RedisService {
     if (connectionName) {
       const client = this.clients.get(connectionName);
       if (client) {
-        await client.quit();
+        await closeRedisClient(client);
         this.clients.delete(connectionName);
       }
       return;
     }
     await Promise.all(
       Array.from(this.clients.values()).map(async (client) => {
-        await client.quit();
+        await closeRedisClient(client);
       })
     );
     this.clients.clear();
@@ -161,14 +248,7 @@ class RedisService {
 
   async scan(pattern, { count = 100, connectionName } = {}) {
     const client = this.getClient(connectionName);
-    const keys = [];
-    let cursor = '0';
-    do {
-      const [nextCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', count);
-      cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== '0');
-    return keys;
+    return scanAcrossClient(client, pattern, count);
   }
 }
 
@@ -198,8 +278,16 @@ async function closeRedisService() {
 // Create simple Redis client for basic operations
 // ============================================================================
 function createSimpleRedisClient() {
-  const cfg = config.redis.primary;
-  const client = new Redis(buildRedisOptions(cfg));
+  const cfg = getRedisConfigs().get('default') || {
+    url: config.redis.primary.url,
+    username: config.redis.primary.username,
+    password: config.redis.primary.password,
+    db: config.redis.primary.db,
+    clusterMode: config.redis.primary.clusterMode,
+    clusterNodes: config.redis.primary.clusterNodes,
+    tls: config.redis.primary.tls
+  };
+  const client = createRedisClient(cfg);
 
   client.on('error', (err) => {
     process.stderr.write(`[Redis] Connection error: ${err.message}\n`);
@@ -233,17 +321,13 @@ function createSimpleRedisClient() {
     }
   };
 
-  const originalScan = client.scan.bind(client);
   client.scan = async function(pattern, options = {}) {
-    const keys = [];
-    let cursor = '0';
     const count = options.count || 100;
-    do {
-      const [nextCursor, batch] = await originalScan(cursor, 'MATCH', pattern, 'COUNT', count);
-      cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== '0');
-    return keys;
+    return scanAcrossClient(client, pattern, count);
+  };
+
+  client.keys = async function(pattern) {
+    return scanAcrossClient(client, pattern, 200);
   };
 
   return client;
