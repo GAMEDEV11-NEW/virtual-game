@@ -1,9 +1,6 @@
 const fs = require('fs');
 const mysql = require('mysql2/promise');
-const AWS = require('aws-sdk');
 require('dotenv').config();
-
-AWS.config.update({ region: process.env.AWS_REGION || 'ap-south-1' });
 
 async function main() {
   const host = process.env.MYSQL_HOST || 'virtual-game-instance-1.chsqo84agkkk.ap-south-1.rds.amazonaws.com';

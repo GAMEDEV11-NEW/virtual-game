@@ -1,25 +1,18 @@
-const {
-  validateJWTToken,
-  validateJwtClaims,
-  decryptUserData
-} = require('../../utils/jwt');
 const { authenticateOpponent } = require('../../utils/authUtils');
 const {
   getLeagueJoinEntry,
-  getUserPiecesCurrentState,
+  getLudoPiecesFromMatch,
   enhancePiecesWithComprehensiveData,
   getDiceID,
   getUserById,
   getOpponentLeagueJoinStatus
 } = require('../../services/ludo/gameService');
-const sessionService = require('../../utils/sessionService');
 const emitError = require('../../utils/emitError');
 const validateFields = require('../../utils/validateFields');
-const { parseJoinMonth } = require('../../utils/userUtils');
 const { redis: redisClient } = require('../../utils/redis');
 const { safeParseRedisData } = require('../../utils/gameUtils');
 const { GAME_STATUS, REDIS_KEYS, DB_QUERIES } = require('../../constants');
-const cassandraClient = require('../../services/cassandra/client');
+const mysqlClient = require('../../services/mysql/client');
 
 // ============================================================================
 // Handler constants
@@ -30,10 +23,7 @@ const SNAKES_GAME_TYPES = new Set(['snakesladders', 'snakes_ladders', 'snake-lad
 const WATER_SORT_GAME_TYPES = new Set(['water-sort-battle', 'watersort']);
 const GAMES_WITH_PIECES = new Set(['ludo', ...SNAKES_GAME_TYPES]);
 const COMPLETED_VALUE = (GAME_STATUS.COMPLETED || 'completed').toLowerCase();
-const STATUS_ID_ACTIVE = '1';
-const SELECT_MATCH_STATUS = 'SELECT status FROM match_pairs WHERE id = ?';
-const SELECT_LEAGUE_JOIN_STATUS =
-  'SELECT opponent_user_id, opponent_league_id, joined_at, match_pair_id, league_id, turn_id, id, status FROM league_joins WHERE user_id = ? AND status_id = ? AND join_month = ?';
+const SELECT_MATCH_STATUS = DB_QUERIES.LUDO_SELECT_MATCH_STATUS;
 
 // ============================================================================
 // Logging helper
@@ -64,6 +54,11 @@ function hasValidOpponent(entry) {
   if (!opponentId || opponentId === 'null' || opponentId === 'undefined') return false;
   return opponentId !== normalizeId(entry?.UserID).toLowerCase();
 }
+
+function sameNormalizedId(a, b) {
+  return normalizeId(a) !== '' && normalizeId(a) === normalizeId(b);
+}
+
 
 // ============================================================================
 // Water sort state initialization
@@ -152,54 +147,6 @@ async function createInitialWaterSortState(gameId, user1Id, user2Id) {
 }
 
 // ============================================================================
-// JWT validation
-// ============================================================================
-function validateJWTTokenAndClaims(jwtToken, socket) {
-  if (!jwtToken) {
-    emitError(socket, {
-      code: 'missing_field',
-      type: 'validation',
-      field: 'jwt_token',
-      message: 'JWT token is required',
-      event: 'opponent:response'
-    });
-    return null;
-  }
-
-  const claims = validateJWTToken(jwtToken);
-  if (!claims) {
-    emitError(socket, {
-      code: 'invalid_token',
-      type: 'authentication',
-      field: 'jwt_token',
-      message: 'Invalid JWT token',
-      event: 'opponent:response'
-    });
-    return null;
-  }
-
-  return validateJwtClaims(claims, socket, 'opponent:response');
-}
-
-// ============================================================================
-// Session validation
-// ============================================================================
-async function validateUserSession(userID, socket) {
-  const session = await sessionService.getSession(userID);
-  if (!session) {
-    emitError(socket, {
-      code: 'session_not_found',
-      type: 'authentication',
-      field: 'user_id',
-      message: 'User session not found',
-      event: 'opponent:response'
-    });
-    return null;
-  }
-  return session;
-}
-
-// ============================================================================
 // Game pieces/dice retrieval
 // ============================================================================
 async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType = 'ludo') {
@@ -222,12 +169,12 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
       if (matchData) {
         const match = safeParseRedisData(matchData);
         if (match) {
-          if (userID === match.user1_id) {
+          if (sameNormalizedId(userID, match.user1_id)) {
             userPieces = Array.isArray(match.user1_pieces) ? match.user1_pieces : [];
             opponentPieces = Array.isArray(match.user2_pieces) ? match.user2_pieces : [];
             userDiceID = match.user1_dice || null;
             opponentDiceID = match.user2_dice || null;
-          } else if (userID === match.user2_id) {
+          } else if (sameNormalizedId(userID, match.user2_id)) {
             userPieces = Array.isArray(match.user2_pieces) ? match.user2_pieces : [];
             opponentPieces = Array.isArray(match.user1_pieces) ? match.user1_pieces : [];
             userDiceID = match.user2_dice || null;
@@ -265,8 +212,11 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
     }
   }
 
-  const userProfile = await getUserById(userID);
-  const opponentProfile = opponentUserID === userID ? userProfile : await getUserById(opponentUserID);
+  // Profile fetch disabled for faster opponent polling response.
+  // const userProfile = await getUserById(userID);
+  // const opponentProfile = opponentUserID === userID ? userProfile : await getUserById(opponentUserID);
+  const userProfile = null;
+  const opponentProfile = null;
 
   return {
     userPieces: Array.isArray(userPieces) ? userPieces : [],
@@ -285,21 +235,7 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
 // Snakes & Ladders piece bootstrap
 // ============================================================================
 async function ensureSnakesPieces(gameID, userID, pieces, opponentUserID) {
-  if (!Array.isArray(pieces) || pieces.length === 0) {
-    let dbPieces = await getUserPiecesCurrentState(gameID, userID);
-    if (!Array.isArray(dbPieces) || dbPieces.length === 0) {
-      try {
-        const { GamePiecesService } = require('../../cron/services/piecesService');
-        const piecesService = new GamePiecesService(cassandraClient);
-        await piecesService.createSnakesLaddersPiecesForMatch(gameID, userID, opponentUserID);
-        dbPieces = await getUserPiecesCurrentState(gameID, userID);
-      } catch (err) {
-        logHandlerError('create snakes pieces failed', err, { gameID, userID });
-      }
-    }
-    return enhancePiecesWithComprehensiveData(Array.isArray(dbPieces) ? dbPieces : [], gameID, userID);
-  }
-  return enhancePiecesWithComprehensiveData(pieces, gameID, userID);
+  return enhancePiecesWithComprehensiveData(Array.isArray(pieces) ? pieces : [], gameID, userID);
 }
 
 // ============================================================================
@@ -307,8 +243,8 @@ async function ensureSnakesPieces(gameID, userID, pieces, opponentUserID) {
 // ============================================================================
 async function ensureLudoPieces(gameID, userID, pieces) {
   if (!Array.isArray(pieces) || pieces.length === 0) {
-    const dbPieces = await getUserPiecesCurrentState(gameID, userID);
-    return enhancePiecesWithComprehensiveData(Array.isArray(dbPieces) ? dbPieces : [], gameID, userID);
+    const fallbackPieces = await getLudoPiecesFromMatch(gameID, userID);
+    return enhancePiecesWithComprehensiveData(Array.isArray(fallbackPieces) ? fallbackPieces : [], gameID, userID);
   }
   return enhancePiecesWithComprehensiveData(pieces, gameID, userID);
 }
@@ -385,15 +321,86 @@ function emitPendingOpponentResponse(socket, entry = {}, message = 'Waiting for 
   });
 }
 
+function emitCompletedOpponentResponse(socket, payload = {}) {
+  socket.emit('opponent:response', {
+    status: 'completed',
+    user_id: payload.user_id ? String(payload.user_id) : '',
+    opponent_user_id: payload.opponent_user_id ? String(payload.opponent_user_id) : '',
+    opponent_league_id: payload.opponent_league_id ? String(payload.opponent_league_id) : '',
+    joined_at: payload.joined_at || null,
+    game_id: payload.game_id ? String(payload.game_id) : '',
+    user_pieces: [],
+    opponent_pieces: [],
+    pieces_status: 'completed',
+    turn_id: payload.turn_id ?? null,
+    message: 'Game has been completed'
+  });
+}
+
+function emitExpiredAndDisconnect(socket, payload = {}) {
+  socket.emit('opponent:response', {
+    status: 'expired',
+    user_id: payload.user_id ? String(payload.user_id) : '',
+    opponent_user_id: '',
+    opponent_league_id: '',
+    joined_at: payload.joined_at || null,
+    game_id: '',
+    user_pieces: [],
+    opponent_pieces: [],
+    pieces_status: 'expired',
+    turn_id: null,
+    message: 'Entry expired'
+  });
+
+  setTimeout(() => {
+    try {
+      socket.disconnect(true);
+    } catch (_) {
+    }
+  }, 50);
+}
+
+async function cleanupExpiredContestJoinCache(userId, contestId, lId) {
+  const normalizedUserId = normalizeId(userId);
+  const normalizedContestId = normalizeId(contestId);
+  const normalizedLid = normalizeId(lId);
+  if (!normalizedUserId || !normalizedContestId) return;
+
+  const keys = [];
+  if (normalizedLid) {
+    keys.push(`contest_join:${normalizedUserId}:${normalizedContestId}:${normalizedLid}`);
+  }
+  keys.push(`contest_join:${normalizedUserId}:${normalizedContestId}`);
+  keys.push(`contest_join:${normalizedUserId}`);
+
+  for (const key of keys) {
+    try {
+      await redisClient.del(key);
+    } catch (_) {
+    }
+  }
+
+  try {
+    const patternKeys = await redisClient.scan(`contest_join:${normalizedUserId}:${normalizedContestId}:*`, { count: 200 });
+    for (const key of patternKeys) {
+      try {
+        await redisClient.del(key);
+      } catch (_) {
+      }
+    }
+  } catch (_) {
+  }
+}
+
 // ============================================================================
 // Locate already-completed joins
 // ============================================================================
-async function findCompletedEntry({ userId, joinMonth, leagueJoinId }) {
+async function findCompletedEntry({ userId, leagueJoinId }) {
   if (leagueJoinId) {
     try {
-      const entryResult = await cassandraClient.execute(DB_QUERIES.SELECT_LEAGUE_JOIN_BY_ID, [leagueJoinId], { prepare: true });
-      if (entryResult.rowLength > 0) {
-        const entryRow = entryResult.rows[0];
+      const [rows] = await mysqlClient.execute(DB_QUERIES.LUDO_SELECT_COMPLETED_BY_LID, [leagueJoinId]);
+      if (Array.isArray(rows) && rows.length > 0) {
+        const entryRow = rows[0];
         if (isCompletedStatus(entryRow.status)) {
           const sameUser = !userId || !entryRow.user_id || entryRow.user_id.toString() === userId.toString();
           if (sameUser) {
@@ -402,27 +409,61 @@ async function findCompletedEntry({ userId, joinMonth, leagueJoinId }) {
         }
       }
     } catch (err) {
-      logHandlerError('query league_joins_by_id failed', err, { leagueJoinId, userId });
+      logHandlerError('query ludo_game by l_id failed', err, { leagueJoinId, userId });
     }
   }
 
   try {
-    const result = await cassandraClient.execute(
-      SELECT_LEAGUE_JOIN_STATUS,
-      [userId, STATUS_ID_ACTIVE, joinMonth],
-      { prepare: true }
-    );
-
-    return result.rows.find((row) => {
+    const [rows] = await mysqlClient.execute(DB_QUERIES.LUDO_SELECT_COMPLETED_BY_USER, [userId]);
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return rows.find((row) => {
       if (!isCompletedStatus(row.status)) return false;
       if (!leagueJoinId) return true;
-      return normalizeId(row.id).toLowerCase() === normalizeId(leagueJoinId).toLowerCase();
-    });
+      return normalizeId(row.l_id).toLowerCase() === normalizeId(leagueJoinId).toLowerCase();
+    }) || null;
   } catch (err) {
-    logHandlerError('query league_joins failed', err, { userId, joinMonth });
+    logHandlerError('query ludo_game by user failed', err, { userId });
   }
 
   return null;
+}
+
+async function findExpiredEntry({ userId, leagueJoinId }) {
+  if (leagueJoinId) {
+    try {
+      const [rows] = await mysqlClient.execute(
+        `
+          SELECT l_id, user_id, joined_at, status, is_deleted
+          FROM ludo_game
+          WHERE l_id = ? AND status = 'expired'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `,
+        [leagueJoinId]
+      );
+      if (Array.isArray(rows) && rows.length > 0) return rows[0];
+    } catch (err) {
+      logHandlerError('query expired by l_id failed', err, { leagueJoinId, userId });
+    }
+  }
+
+  try {
+    const [rows] = await mysqlClient.execute(
+      `
+        SELECT l_id, user_id, joined_at, status, is_deleted
+        FROM ludo_game
+        WHERE user_id = ? AND status = 'expired'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+      [userId]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return rows[0];
+  } catch (err) {
+    logHandlerError('query expired by user failed', err, { userId });
+    return null;
+  }
 }
 
 // ============================================================================
@@ -508,21 +549,21 @@ async function ensureWaterSortState(entry, gameData) {
 // ============================================================================
 // Determine if match or league joins are completed
 // ============================================================================
-async function checkMatchCompletion(entry, matchPairID, joinMonth) {
+async function checkMatchCompletion(entry, matchPairID) {
   if (!matchPairID) {
     return { completed: false };
   }
 
   try {
-    const matchResult = await cassandraClient.execute(SELECT_MATCH_STATUS, [matchPairID], { prepare: true });
-    if (matchResult.rowLength > 0) {
-      const matchStatus = matchResult.first().status;
+    const [rows] = await mysqlClient.execute(SELECT_MATCH_STATUS, [matchPairID]);
+    if (Array.isArray(rows) && rows.length > 0) {
+      const matchStatus = rows[0]?.status;
       if (isCompletedStatus(matchStatus)) {
         return { completed: true };
       }
     }
   } catch (err) {
-    logHandlerError('check match_pairs status failed', err, { matchPairID });
+    logHandlerError('check ludo_game match status failed', err, { matchPairID });
   }
 
   const userCompleted = isCompletedStatus(entry.status);
@@ -535,15 +576,14 @@ async function checkMatchCompletion(entry, matchPairID, joinMonth) {
   }
 
   try {
-    const opponentStatus = await getOpponentLeagueJoinStatus(entry.OpponentUserID, matchPairID, joinMonth);
+    const opponentStatus = await getOpponentLeagueJoinStatus(entry.OpponentUserID, matchPairID);
     if (isCompletedStatus(opponentStatus)) {
       return { completed: true };
     }
   } catch (err) {
     logHandlerError('check opponent status failed', err, {
       opponentUserID: entry.OpponentUserID,
-      matchPairID,
-      joinMonth
+      matchPairID
     });
   }
 
@@ -554,64 +594,67 @@ async function checkMatchCompletion(entry, matchPairID, joinMonth) {
 // Main handler
 // ============================================================================
 async function handleCheckOpponent(socket, data) {
-  const decrypted = await authenticateOpponent(socket, data, 'opponent:response', decryptUserData);
-  if (!decrypted) return;
+  const payload = await authenticateOpponent(socket, data, 'opponent:response');
+  if (!payload) {
+    return;
+  }
+  if (!validateFields(socket, payload, REQUIRED_FIELDS, 'opponent:response')) {
+    return;
+  }
 
-  if (!validateFields(socket, decrypted, REQUIRED_FIELDS, 'opponent:response')) return;
+  const { user_id, contest_id, l_id } = payload;
+  const gameType = (payload.game_type || 'ludo').toString().toLowerCase();
 
-  const { user_id, contest_id, l_id } = decrypted;
-  const gameType = (decrypted.game_type || 'ludo').toString().toLowerCase();
-  if (!validateJWTTokenAndClaims(decrypted.jwt_token, socket)) return;
-  if (!(await validateUserSession(user_id, socket))) return;
-
-  const joinMonthResult = parseJoinMonth(decrypted.joined_at, socket, 'opponent:response');
-  if (joinMonthResult === null) return;
-
-  const { joinMonth } = joinMonthResult;
-  const entry = await getLeagueJoinEntry(user_id, contest_id, joinMonth, l_id);
+  const entry = await getLeagueJoinEntry(user_id, contest_id, '', l_id);
 
   if (!entry) {
-    const completedRow = await findCompletedEntry({ userId: user_id, joinMonth, leagueJoinId: l_id });
+    const completedRow = await findCompletedEntry({ userId: user_id, leagueJoinId: l_id });
     if (completedRow) {
-      socket.emit('opponent:response', {
-        status: 'completed',
+      emitCompletedOpponentResponse(socket, {
         user_id,
-        opponent_user_id: '',
+        opponent_user_id: completedRow.opponent_user_id || '',
         opponent_league_id: completedRow.opponent_league_id ? completedRow.opponent_league_id.toString() : '',
         joined_at: completedRow.joined_at ? toIsoDate(completedRow.joined_at) : null,
-        game_id: completedRow.match_pair_id ? completedRow.match_pair_id.toString() : '',
-        user_pieces: [],
-        opponent_pieces: [],
-        pieces_status: 'completed',
-        turn_id: completedRow.turn_id,
-        message: 'Game has been completed'
+        game_id: completedRow.match_id ? completedRow.match_id.toString() : '',
+        turn_id: completedRow.turn_id
       });
-    } else {
-      emitPendingOpponentResponse(socket, { UserID: user_id }, 'Waiting for opponent match...');
+      return;
     }
+
+    const expiredRow = await findExpiredEntry({ userId: user_id, leagueJoinId: l_id });
+    if (expiredRow) {
+      await cleanupExpiredContestJoinCache(user_id, contest_id, l_id || expiredRow.l_id);
+      emitExpiredAndDisconnect(socket, {
+        user_id,
+        joined_at: expiredRow.joined_at ? toIsoDate(expiredRow.joined_at) : null
+      });
+      return;
+    }
+
+    emitPendingOpponentResponse(socket, { UserID: user_id }, 'Waiting for opponent match...');
     return;
   }
 
-  if (!entry.UserID || !entry.MatchPairID) {
-    emitPendingOpponentResponse(socket, entry, 'Entry data incomplete, waiting for match...');
+  const normalizedMatchPairId = normalizeId(entry.MatchPairID);
+  if (!entry.UserID || !normalizedMatchPairId) {
+    const statusLower = normalizeId(entry.status).toLowerCase();
+    const waitMessage = statusLower === 'matched'
+      ? 'Matched found, preparing game...'
+      : 'Entry data incomplete, waiting for match...';
+    emitPendingOpponentResponse(socket, entry, waitMessage);
     return;
   }
 
-  const matchPairID = normalizeId(entry.MatchPairID);
-  const completionState = await checkMatchCompletion(entry, matchPairID, joinMonth);
+  const matchPairID = normalizedMatchPairId;
+  const completionState = await checkMatchCompletion(entry, matchPairID);
   if (completionState.completed) {
-    socket.emit('opponent:response', {
-      status: 'completed',
+    emitCompletedOpponentResponse(socket, {
       user_id: entry.UserID ? String(entry.UserID) : '',
       opponent_user_id: entry.OpponentUserID ? String(entry.OpponentUserID) : '',
       opponent_league_id: entry.OpponentLeagueID ? String(entry.OpponentLeagueID) : '',
       joined_at: toIsoDate(entry.JoinedAt),
       game_id: matchPairID,
-      user_pieces: [],
-      opponent_pieces: [],
-      pieces_status: 'completed',
-      turn_id: entry.TurnID,
-      message: 'Game has been completed'
+      turn_id: entry.TurnID
     });
     return;
   }
@@ -623,11 +666,12 @@ async function handleCheckOpponent(socket, data) {
 
   const gameData = await fetchGamePiecesAndDice(matchPairID, entry.UserID, entry.OpponentUserID, gameType);
 
-  if (WATER_SORT_GAME_TYPES.has(gameType)) {
-    const waterSortPayload = await ensureWaterSortState(entry, gameData);
-    socket.emit('opponent:response', waterSortPayload);
-    return;
-  }
+  // if (WATER_SORT_GAME_TYPES.has(gameType)) {
+  //   console.error('[check:opponent] watersort_payload_emit', { user_id: entry.UserID, matchPairID });
+  //   const waterSortPayload = await ensureWaterSortState(entry, gameData);
+  //   socket.emit('opponent:response', waterSortPayload);
+  //   return;
+  // }
 
   emitOpponentResponseWithGameData(socket, entry, gameData, gameType);
 }

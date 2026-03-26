@@ -1,41 +1,62 @@
 const mysql = require('mysql2/promise');
 const { config } = require('./config');
 
-let pool;
+const pools = new Map();
 
-async function initMySQL() {
-  if (pool) return pool;
+function getDbConfig(name = 'primary') {
+  if (name === 'secondary') {
+    return config.mysqlSecondary;
+  }
+  return config.mysql;
+}
 
-  pool = mysql.createPool({
-    host: config.mysql.host,
-    port: config.mysql.port,
-    database: config.mysql.database,
-    user: config.mysql.user,
-    password: config.mysql.password,
+async function initMySQL(name = 'primary') {
+  if (pools.has(name)) return pools.get(name);
+
+  const dbConfig = getDbConfig(name);
+  if (!dbConfig || !dbConfig.database) {
+    throw new Error(`MySQL ${name} database is not configured.`);
+  }
+
+  const pool = mysql.createPool({
+    host: dbConfig.host,
+    port: dbConfig.port,
+    database: dbConfig.database,
+    user: dbConfig.user,
+    password: dbConfig.password,
     waitForConnections: true,
-    connectionLimit: config.mysql.connectionLimit,
+    connectionLimit: dbConfig.connectionLimit,
     queueLimit: 0
   });
 
   await pool.query('SELECT 1');
+  pools.set(name, pool);
   return pool;
 }
 
-function getPool() {
+function getPool(name = 'primary') {
+  const pool = pools.get(name);
   if (!pool) {
-    throw new Error('MySQL not initialized. Call initMySQL() first.');
+    throw new Error(`MySQL ${name} is not initialized. Call initMySQL('${name}') first.`);
   }
   return pool;
 }
 
-async function closeMySQL() {
+async function closeMySQL(name = 'primary') {
+  const pool = pools.get(name);
   if (!pool) return;
   await pool.end();
-  pool = undefined;
+  pools.delete(name);
+}
+
+async function closeAllMySQL() {
+  const names = Array.from(pools.keys());
+  await Promise.all(names.map((name) => closeMySQL(name)));
 }
 
 module.exports = {
   initMySQL,
   getPool,
-  closeMySQL
+  closeMySQL,
+  closeAllMySQL
 };

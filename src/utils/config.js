@@ -44,6 +44,21 @@ const config = {
     password: getEnv('MYSQL_PASSWORD', ''),
     connectionLimit: getNumber('MYSQL_CONNECTION_LIMIT', 10)
   },
+  mysqlSecondary: {
+    host: getEnv('MYSQL_SECONDARY_HOST', getEnv('MYSQL_HOST', '127.0.0.1')),
+    port: getNumber('MYSQL_SECONDARY_PORT', getNumber('MYSQL_PORT', 3306)),
+    database: getEnv('MYSQL_SECONDARY_DATABASE', ''),
+    user: getEnv('MYSQL_SECONDARY_USER', getEnv('MYSQL_USER', 'game_user')),
+    password: getEnv('MYSQL_SECONDARY_PASSWORD', getEnv('MYSQL_PASSWORD', '')),
+    connectionLimit: getNumber('MYSQL_SECONDARY_CONNECTION_LIMIT', getNumber('MYSQL_CONNECTION_LIMIT', 10))
+  },
+  s3: {
+    region: getEnv('AWS_REGION', 'ap-south-1'),
+    bucket: getEnv('S3_BUCKET_NAME', ''),
+    prefix: getEnv('S3_GAME_DATA_PREFIX', 'games/ludo'),
+    acl: getEnv('S3_OBJECT_ACL', 'private'),
+    serverSideEncryption: getEnv('S3_SERVER_SIDE_ENCRYPTION', '')
+  },
   serverPort: getNumber('SERVER_PORT', 3008),
   serverId: getEnv('SERVER_ID', '1'),
   app: {

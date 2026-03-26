@@ -1,40 +1,25 @@
 const { redis: redisClient } = require('../../utils/redis');
-const cassandraClient = require('../cassandra/client');
 const { loadPiecesIntoMatchState } = require('../../helpers/ludo/pieceMoveHelpers');
 const { safeParseRedisData } = require('../../utils/gameUtils');
 const { REDIS_KEYS } = require('../../constants');
 
-const PIECE_KILLS_KEYSPACE = process.env.CASSANDRA_KEYSPACE || 'myapp';
+function normalizeId(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeId(a);
+  const nb = normalizeId(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
 
 // ============================================================================
 // Ensure piece kills table exists
 // ============================================================================
 async function ensurePieceKillsTableExists() {
-  try {
-    const createTableQuery = `
-      CREATE TABLE IF NOT EXISTS ${PIECE_KILLS_KEYSPACE}.piece_kills (
-        game_id text,
-        piece_id text,
-        user_id text,
-        killed_user_id text,
-        killed_at timestamp,
-        created_at timestamp,
-        PRIMARY KEY (game_id, piece_id, user_id)
-      )
-    `;
-    await cassandraClient.execute(createTableQuery);
-    
-    try {
-      await cassandraClient.execute(
-        `ALTER TABLE ${PIECE_KILLS_KEYSPACE}.piece_kills ADD created_at timestamp`
-      );
-    } catch (alterErr) {
-      if (!alterErr.message || !alterErr.message.includes('already exists')) {
-      }
-    }
-    
-    return true;
-  } catch (_) { return false; }
+  return true;
 }
 
 // ============================================================================
@@ -42,12 +27,15 @@ async function ensurePieceKillsTableExists() {
 // ============================================================================
 async function insertKillAudit(gameID, killedPieceID, killerUserID, killedUserID, killedAt) {
   try {
-    await ensurePieceKillsTableExists();
-    await cassandraClient.execute(
-      `INSERT INTO ${PIECE_KILLS_KEYSPACE}.piece_kills (game_id, piece_id, user_id, killed_user_id, killed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      [gameID, killedPieceID, killedUserID, killerUserID, killedAt, new Date()],
-      { prepare: true }
-    );
+    const auditData = {
+      game_id: gameID,
+      piece_id: killedPieceID,
+      user_id: killedUserID,
+      killed_user_id: killerUserID,
+      killed_at: killedAt instanceof Date ? killedAt.toISOString() : new Date().toISOString(),
+      created_at: new Date().toISOString()
+    };
+    await redisClient.rpush('audit:piece_kills', JSON.stringify(auditData));
     return true;
   } catch (err) {
     try {
@@ -68,8 +56,8 @@ async function updateKilledPieceInMatchState(gameID, killedUserID, killedPieceID
   let match = safeParseRedisData(matchRaw);
   if (!match) return null;
   let userPieces = null;
-  if (killedUserID === match.user1_id && match.user1_pieces) userPieces = match.user1_pieces;
-  else if (killedUserID === match.user2_id && match.user2_pieces) userPieces = match.user2_pieces;
+  if (sameId(killedUserID, match.user1_id) && match.user1_pieces) userPieces = match.user1_pieces;
+  else if (sameId(killedUserID, match.user2_id) && match.user2_pieces) userPieces = match.user2_pieces;
   if (!userPieces) {
     const loaded = await loadPiecesIntoMatchState(gameID, killedUserID);
     if (loaded) {
@@ -77,8 +65,8 @@ async function updateKilledPieceInMatchState(gameID, killedUserID, killedPieceID
       if (reloadRaw) {
         match = safeParseRedisData(reloadRaw);
         if (!match) return null;
-        if (killedUserID === match.user1_id && match.user1_pieces) userPieces = match.user1_pieces;
-        else if (killedUserID === match.user2_id && match.user2_pieces) userPieces = match.user2_pieces;
+        if (sameId(killedUserID, match.user1_id) && match.user1_pieces) userPieces = match.user1_pieces;
+        else if (sameId(killedUserID, match.user2_id) && match.user2_pieces) userPieces = match.user2_pieces;
       }
     }
   }
@@ -106,8 +94,8 @@ async function updateMultipleKilledPiecesInMatchState(gameID, killedUserID, kill
   let match = safeParseRedisData(matchRaw);
   if (!match) return null;
   let userPieces = null;
-  if (killedUserID === match.user1_id && match.user1_pieces) userPieces = match.user1_pieces;
-  else if (killedUserID === match.user2_id && match.user2_pieces) userPieces = match.user2_pieces;
+  if (sameId(killedUserID, match.user1_id) && match.user1_pieces) userPieces = match.user1_pieces;
+  else if (sameId(killedUserID, match.user2_id) && match.user2_pieces) userPieces = match.user2_pieces;
   if (!userPieces) {
     const loaded = await loadPiecesIntoMatchState(gameID, killedUserID);
     if (loaded) {
@@ -115,8 +103,8 @@ async function updateMultipleKilledPiecesInMatchState(gameID, killedUserID, kill
       if (reloadRaw) {
         match = safeParseRedisData(reloadRaw);
         if (!match) return null;
-        if (killedUserID === match.user1_id && match.user1_pieces) userPieces = match.user1_pieces;
-        else if (killedUserID === match.user2_id && match.user2_pieces) userPieces = match.user2_pieces;
+        if (sameId(killedUserID, match.user1_id) && match.user1_pieces) userPieces = match.user1_pieces;
+        else if (sameId(killedUserID, match.user2_id) && match.user2_pieces) userPieces = match.user2_pieces;
       }
     }
   }

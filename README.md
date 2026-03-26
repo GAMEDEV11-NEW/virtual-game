@@ -1911,3 +1911,22 @@ The system is designed to be **scalable**, **reliable**, and **maintainable** wi
 **Last Updated**: 2024
 **Version**: 1.0.0
 **Maintained By**: Development Team
+
+---------------------------------------------------------------------
+
+Use this separation pattern:
+
+- API/socket server only
+- Cron worker only
+
+You already have scripts for this in `package.json`:
+
+```bash
+npm run start:server   # starts src/server.js with --no-cron
+npm run start:cron     # starts src/cron-worker.js
+```
+
+How it works:
+1. `src/server.js` runs HTTP + Socket.IO.
+2. `src/cron-worker.js` runs scheduled matchmaking/timers.
+3. `--no-cron` prevents cron from starting inside server process.

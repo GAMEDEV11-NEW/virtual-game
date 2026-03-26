@@ -1,7 +1,8 @@
-const { redis: redisClient } = require('../../utils/redis');
+const { redis: redisClient, safeParseRedisData } = require('../../utils/redis');
 const { REDIS_KEYS, GAME_STATUS } = require('../../constants');
 const { toISOString } = require('../../utils/dateUtils');
 const { getCurrentDate } = require('../../utils/dateUtils');
+const { archiveLudoGameState } = require('./archiveService');
 
 const {
   getLeagueJoinInfoForGame,
@@ -49,8 +50,32 @@ async function updateMatchPairToWinnerDeclared(gameId) {
 // ============================================================================
 // Cleanup Redis data
 // ============================================================================
-async function cleanupRedisMatchData(gameId) {
+async function cleanupRedisMatchData(gameId, finalMatchData = null) {
+  let archivePayload = finalMatchData;
+  if (!archivePayload) {
+    try {
+      const raw = await redisClient.get(REDIS_KEYS.MATCH(gameId));
+      archivePayload = safeParseRedisData(raw);
+    } catch (_) {
+    }
+  }
+  try {
+    await archiveLudoGameState(gameId, archivePayload, 'winner_cleanup');
+  } catch (_) {
+  }
+
   const result = await baseCleanupRedisMatchData(gameId, 'ludo', REDIS_KEYS);
+  try {
+    const matchServerKeys = await redisClient.scan(`match_server:${String(gameId)}:*`, { count: 100 });
+    if (Array.isArray(matchServerKeys) && matchServerKeys.length > 0) {
+      for (const key of matchServerKeys) {
+        try {
+          await redisClient.del(key);
+        } catch (_) {
+        }
+      }
+    }
+  } catch (_) {}
   
   // Also clear winner declaration key if it exists
   try {

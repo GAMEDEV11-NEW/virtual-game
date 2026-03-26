@@ -43,7 +43,13 @@ async function cleanupRedisMappings(socketId, userId = null) {
     }
     
     if (userId) {
-      operations.push(redisClient.del(REDIS_KEYS.USER_TO_SOCKET(userId)));
+      const currentMappedSocketId = await redisClient.get(REDIS_KEYS.USER_TO_SOCKET(userId));
+      if (
+        !currentMappedSocketId ||
+        String(currentMappedSocketId).trim() === String(socketId || '').trim()
+      ) {
+        operations.push(redisClient.del(REDIS_KEYS.USER_TO_SOCKET(userId)));
+      }
     }
     
     if (operations.length > 0) {
@@ -199,8 +205,18 @@ async function fetchUserChances(gameId, matchData, gameType = 'ludo') {
       return { user1Chance: 0, user2Chance: 0 };
     }
 
+    if ((gameType || '').toLowerCase() === 'ludo') {
+      return {
+        user1Chance: Number(matchData.user1_chance || 0),
+        user2Chance: Number(matchData.user2_chance || 0),
+      };
+    }
+
     const { getUserChanceKey } = require('../../utils/redis');
     const chanceKey = getUserChanceKey(gameId, gameType);
+    if (!chanceKey) {
+      return { user1Chance: 0, user2Chance: 0 };
+    }
     const chanceRaw = await redisClient.get(chanceKey);
 
     if (!chanceRaw) {
@@ -579,7 +595,9 @@ async function cleanupRedisKeys(gameId, config) {
     
     if (getUserChanceKey) {
       const chanceKey = getUserChanceKey(gameId);
-      operations.push(redisClient.del(chanceKey));
+      if (chanceKey) {
+        operations.push(redisClient.del(chanceKey));
+      }
     }
     
     if (getActiveGamesKey) {

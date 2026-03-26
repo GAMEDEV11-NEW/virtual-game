@@ -1,6 +1,4 @@
 const { v4: uuidv4 } = require('uuid');
-const cassandraClient = require('../../services/cassandra/client');
-const sessionService = require('../../utils/sessionService');
 const { redis: redisClient } = require('../../utils/redis');
 const { generateDiceRoll } = require('../common/gameHelpers');
 const { REDIS_KEYS } = require('../../constants');
@@ -10,6 +8,18 @@ const MATCH_ROLL_KEYS = {
   lastSix: { user1: 'last_six_get_user1', user2: 'last_six_get_user2' },
   consecutiveSix: { user1: 'consecutive_six_user1', user2: 'consecutive_six_user2' },
 };
+
+function normalizeId(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeId(a);
+  const nb = normalizeId(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
 
 function generateDiceNumber() {
   const diceNumber = generateDiceRoll();
@@ -62,53 +72,9 @@ function rollDiceWithSixLogic(
   return diceResult;
 }
 
-// ============================================================================
-// Normalizes device ID for comparison (handles type, whitespace, null/undefined)
-// ============================================================================
-function normalizeDeviceId(deviceId) {
-  if (deviceId === null || deviceId === undefined) {
-    return '';
-  }
-  // Convert to string and trim whitespace
-  return String(deviceId).trim();
-}
-
-// ============================================================================
-// Validates user session and device ID
-// ============================================================================
-async function validateUserSession(userId, { device_id: deviceId }) {
-  const session = await sessionService.getSession(userId);
-  if (!session) throw new Error('invalid or expired session');
-  if (!session.is_active) throw new Error('session is not active');
-  
-  // Normalize both device IDs before comparison
-  const sessionDeviceId = normalizeDeviceId(session.device_id);
-  const requestDeviceId = normalizeDeviceId(deviceId);
-  
-  // Compare normalized values
-  if (sessionDeviceId !== requestDeviceId) {
-    const refreshedSession = await sessionService.getSessionFromDb(userId);
-    if (!refreshedSession) {
-      throw new Error('invalid or expired session');
-    }
-    if (!refreshedSession.is_active) {
-      throw new Error('session is not active');
-    }
-
-    const refreshedSessionDeviceId = normalizeDeviceId(refreshedSession.device_id);
-    if (refreshedSessionDeviceId !== requestDeviceId) {
-      const errorMsg = `device ID mismatch: session="${refreshedSessionDeviceId.substring(0, 10)}..." request="${requestDeviceId.substring(0, 10)}..."`;
-      throw new Error(errorMsg);
-    }
-    return refreshedSession;
-  }
-  
-  return session;
-}
-
 function resolveMatchKeys(match, userId) {
   if (!match) return {};
-  const isUser1 = userId === match.user1_id;
+  const isUser1 = sameId(userId, match.user1_id);
   return {
     totalRollsKey: isUser1 ? MATCH_ROLL_KEYS.totalRolls.user1 : MATCH_ROLL_KEYS.totalRolls.user2,
     lastSixKey: isUser1 ? MATCH_ROLL_KEYS.lastSix.user1 : MATCH_ROLL_KEYS.lastSix.user2,
@@ -117,8 +83,8 @@ function resolveMatchKeys(match, userId) {
 
 function resolveConsecutiveSixKey(match, userId) {
   if (!match) return null;
-  if (userId === match.user1_id) return MATCH_ROLL_KEYS.consecutiveSix.user1;
-  if (userId === match.user2_id) return MATCH_ROLL_KEYS.consecutiveSix.user2;
+  if (sameId(userId, match.user1_id)) return MATCH_ROLL_KEYS.consecutiveSix.user1;
+  if (sameId(userId, match.user2_id)) return MATCH_ROLL_KEYS.consecutiveSix.user2;
   return null;
 }
 
@@ -150,61 +116,15 @@ async function getOrCreateDiceLookupId(gameId, userId) {
   if (gameId == null || userId == null) {
     return null;
   }
-  const query = 'SELECT dice_id FROM dice_rolls_lookup WHERE game_id = ? AND user_id = ? LIMIT 1';
-  const result = await cassandraClient.execute(query, [gameId, userId], { prepare: true });
-  if (result.rowLength > 0 && result.rows[0].dice_id) {
-    return result.rows[0].dice_id;
-  }
-  const lookupDiceID = uuidv4();
-  await cassandraClient.execute(
-    'INSERT INTO dice_rolls_lookup (game_id, user_id, dice_id, created_at) VALUES (?, ?, ?, ?)',
-    [gameId, userId, lookupDiceID, new Date().toISOString()],
-    { prepare: true }
-  );
-  return lookupDiceID;
+  return uuidv4();
 }
 
 function enqueueDiceRollPersistence({ lookupDiceID, rollID, diceNumber, rollTime, rollReq }) {
-  (async () => {
-    try {
-      await cassandraClient.execute(
-        'INSERT INTO dice_rolls_data (lookup_dice_id, roll_id, dice_number, roll_timestamp, session_token, device_id, contest_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          lookupDiceID,
-          rollID,
-          diceNumber,
-          rollTime.toISOString(),
-          rollReq.session_token,
-          rollReq.device_id,
-          rollReq.contest_id,
-          rollTime.toISOString(),
-        ],
-        { prepare: true }
-      );
-    } catch (err) {
-      try {
-        const failedData = {
-          lookupDiceID,
-          rollID,
-          diceNumber,
-          rollTimestamp: rollTime.toISOString(),
-          sessionToken: rollReq.session_token,
-          deviceID: rollReq.device_id,
-          contestID: rollReq.contest_id,
-          createdAt: rollTime.toISOString(),
-          error: err.message,
-          timestamp: new Date().toISOString(),
-        };
-        await redisClient.rpush('failed:dice_rolls', JSON.stringify(failedData));
-      } catch (_) {
-        // Swallow errors while writing to the fallback queue
-      }
-    }
-  })();
+  return;
 }
 
 async function processDiceRoll(rollReq, userId, match = null) {
-  await validateUserSession(userId, rollReq);
+  // Direct-mode flow: skip strict session/device validation.
 
   const { totalRollsKey, lastSixKey } = resolveMatchKeys(match, userId);
   const { actualTotalRolls, actualLastSixGet } = readMatchRollCounters(match, {

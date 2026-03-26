@@ -16,6 +16,18 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function normalizeIdValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeIdValue(a);
+  const nb = normalizeIdValue(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
+
 // ============================================================================
 // logDiceHandlerError
 // ============================================================================
@@ -116,9 +128,9 @@ async function getUserPieces(gameID, userID, match = null) {
   let pieces = null;
   try {
     if (match) {
-      if (userID === match.user1_id && match.user1_pieces) {
+      if (sameId(userID, match.user1_id) && match.user1_pieces) {
         pieces = match.user1_pieces;
-      } else if (userID === match.user2_id && match.user2_pieces) {
+      } else if (sameId(userID, match.user2_id) && match.user2_pieces) {
         pieces = match.user2_pieces;
       }
     }
@@ -131,9 +143,9 @@ async function getUserPieces(gameID, userID, match = null) {
         if (matchRaw) {
           const updatedMatch = safeParseRedisData(matchRaw);
           if (updatedMatch) {
-            if (userID === updatedMatch.user1_id && updatedMatch.user1_pieces) {
+            if (sameId(userID, updatedMatch.user1_id) && updatedMatch.user1_pieces) {
               pieces = updatedMatch.user1_pieces;
-            } else if (userID === updatedMatch.user2_id && updatedMatch.user2_pieces) {
+            } else if (sameId(userID, updatedMatch.user2_id) && updatedMatch.user2_pieces) {
               pieces = updatedMatch.user2_pieces;
             }
           }
@@ -201,8 +213,8 @@ function isFirstMove(match) {
 // getFirstSixKey
 // ============================================================================
 function getFirstSixKey(match, user_id) {
-  if (user_id === match.user1_id) return 'first_six_rolled_user1';
-  if (user_id === match.user2_id) return 'first_six_rolled_user2';
+  if (sameId(user_id, match.user1_id)) return 'first_six_rolled_user1';
+  if (sameId(user_id, match.user2_id)) return 'first_six_rolled_user2';
   return null;
 }
 
@@ -210,8 +222,8 @@ function getFirstSixKey(match, user_id) {
 // getConsecutiveSixKey
 // ============================================================================
 function getConsecutiveSixKey(match, user_id) {
-  if (user_id === match.user1_id) return 'consecutive_six_user1';
-  if (user_id === match.user2_id) return 'consecutive_six_user2';
+  if (sameId(user_id, match.user1_id)) return 'consecutive_six_user1';
+  if (sameId(user_id, match.user2_id)) return 'consecutive_six_user2';
   return null;
 }
 
@@ -228,8 +240,8 @@ function shouldLoseTurnForConsecutiveSix(match, user_id) {
 // getTotalRollsKey
 // ============================================================================
 function getTotalRollsKey(match, user_id) {
-  if (user_id === match.user1_id) return 'total_rolls_user1';
-  if (user_id === match.user2_id) return 'total_rolls_user2';
+  if (sameId(user_id, match.user1_id)) return 'total_rolls_user1';
+  if (sameId(user_id, match.user2_id)) return 'total_rolls_user2';
   return null;
 }
 
@@ -237,8 +249,8 @@ function getTotalRollsKey(match, user_id) {
 // getLastSixGetKey
 // ============================================================================
 function getLastSixGetKey(match, user_id) {
-  if (user_id === match.user1_id) return 'last_six_get_user1';
-  if (user_id === match.user2_id) return 'last_six_get_user2';
+  if (sameId(user_id, match.user1_id)) return 'last_six_get_user1';
+  if (sameId(user_id, match.user2_id)) return 'last_six_get_user2';
   return null;
 }
 
@@ -246,8 +258,8 @@ function getLastSixGetKey(match, user_id) {
 // getIsFirstSixKey
 // ============================================================================
 function getIsFirstSixKey(match, user_id) {
-  if (user_id === match.user1_id) return 'is_first_six_user1';
-  if (user_id === match.user2_id) return 'is_first_six_user2';
+  if (sameId(user_id, match.user1_id)) return 'is_first_six_user1';
+  if (sameId(user_id, match.user2_id)) return 'is_first_six_user2';
   return null;
 }
 
@@ -255,8 +267,8 @@ function getIsFirstSixKey(match, user_id) {
 // getGuaranteedSixTurnsKey
 // ============================================================================
 function getGuaranteedSixTurnsKey(match, user_id) {
-  if (user_id === match.user1_id) return 'guaranteed_six_turns_user1';
-  if (user_id === match.user2_id) return 'guaranteed_six_turns_user2';
+  if (sameId(user_id, match.user1_id)) return 'guaranteed_six_turns_user1';
+  if (sameId(user_id, match.user2_id)) return 'guaranteed_six_turns_user2';
   return null;
 }
 
@@ -264,8 +276,8 @@ function getGuaranteedSixTurnsKey(match, user_id) {
 // getInGuaranteedSixModeKey
 // ============================================================================
 function getInGuaranteedSixModeKey(match, user_id) {
-  if (user_id === match.user1_id) return 'in_guaranteed_six_mode_user1';
-  if (user_id === match.user2_id) return 'in_guaranteed_six_mode_user2';
+  if (sameId(user_id, match.user1_id)) return 'in_guaranteed_six_mode_user1';
+  if (sameId(user_id, match.user2_id)) return 'in_guaranteed_six_mode_user2';
   return null;
 }
 
@@ -273,8 +285,8 @@ function getInGuaranteedSixModeKey(match, user_id) {
 // getGuaranteedSixTurnsRemainingKey
 // ============================================================================
 function getGuaranteedSixTurnsRemainingKey(match, user_id) {
-  if (user_id === match.user1_id) return 'guaranteed_six_turns_remaining_user1';
-  if (user_id === match.user2_id) return 'guaranteed_six_turns_remaining_user2';
+  if (sameId(user_id, match.user1_id)) return 'guaranteed_six_turns_remaining_user1';
+  if (sameId(user_id, match.user2_id)) return 'guaranteed_six_turns_remaining_user2';
   return null;
 }
 
@@ -386,8 +398,8 @@ function addDiceSixTracking(match, user_id, diceNumber) {
 // getTimerKey
 // ============================================================================
 function getTimerKey(match, user_id) {
-  if (match.user1_id === user_id) return 'user1_time';
-  if (match.user2_id === user_id) return 'user2_time';
+  if (sameId(match.user1_id, user_id)) return 'user1_time';
+  if (sameId(match.user2_id, user_id)) return 'user2_time';
   return null;
 }
 
@@ -435,7 +447,7 @@ function handleNotUserTurn(socket, user_id) {
 async function handleTurnTimeout(socket, match, user_id, timeKey, opponentTimeKey, matchKey, redisClient) {
   try {
     const now = new Date();
-    const opponentId = user_id === match.user1_id ? match.user2_id : match.user1_id;
+    const opponentId = sameId(user_id, match.user1_id) ? match.user2_id : match.user1_id;
 
     match[timeKey] = now.toISOString();
     match[opponentTimeKey] = now.toISOString();
@@ -497,7 +509,7 @@ function validateGameState(socket, match, user_id) {
     return { isValid: false };
   }
 
-  if (match.turn !== user_id) {
+  if (!sameId(match.turn, user_id)) {
     handleNotUserTurn(socket, user_id);
     return { isValid: false };
   }
@@ -511,8 +523,8 @@ function validateGameState(socket, match, user_id) {
 async function checkTurnTimeout(socket, match, user_id, game_id) {
   try {
     const now = new Date();
-    const timeKey = match.turn === match.user1_id ? 'user1_time' : 'user2_time';
-    const opponentTimeKey = match.turn === match.user1_id ? 'user2_time' : 'user1_time';
+    const timeKey = sameId(match.turn, match.user1_id) ? 'user1_time' : 'user2_time';
+    const opponentTimeKey = sameId(match.turn, match.user1_id) ? 'user2_time' : 'user1_time';
     const isFirst = isFirstMove(match);
 
     if (!isFirst) {
@@ -815,7 +827,7 @@ async function manageTurnLogic(match, user_id, response, pieceCheck) {
   const firstSixKey = getFirstSixKey(match, user_id);
   const isFirstSixNotRolled = !match[firstSixKey];
   const canMoveAfterRoll = await canMoveAnyPiece(match.game_id || 'temp', user_id, response.dice_number, match);
-  const opponentId = match.turn === match.user1_id ? match.user2_id : match.user1_id;
+  const opponentId = sameId(match.turn, match.user1_id) ? match.user2_id : match.user1_id;
 
   if (pieceCheck.allPiecesAtHome && pieceCheck.needsSixToStart) {
     handleAllPiecesAtHomeLogic(match, user_id, response, pieceCheck.canStartWithSix, opponentId);
@@ -867,6 +879,7 @@ async function manageTurnLogic(match, user_id, response, pieceCheck) {
 // registerDiceRollHandler
 // ============================================================================
 async function registerDiceRollHandler(io, socket) {
+  socket.removeAllListeners('dice:roll');
   socket.on('dice:roll', async (event) => {
     // Create response guarantee to ensure user always gets a response
     const responseGuarantee = createResponseGuarantee(socket, 'dice:roll:response', 10000);
@@ -879,7 +892,8 @@ async function registerDiceRollHandler(io, socket) {
           responseGuarantee.markAsSent(); // Response already sent by validateRequestFields
           return;
         }
-        const { game_id, user_id } = diceData;
+        const game_id = normalizeIdValue(diceData.game_id);
+        const user_id = normalizeIdValue(diceData.user_id || user.user_id);
 
         const match = await fetchMatchOrEmitError(socket, game_id, redisClient, 'dice:roll:response');
         
@@ -928,7 +942,7 @@ async function registerDiceRollHandler(io, socket) {
           match.turnCount = {};
         }
 
-        if (!match.previousTurn || match.previousTurn !== user_id) {
+        if (!match.previousTurn || !sameId(match.previousTurn, user_id)) {
           match.turnCount[user_id] = (match.turnCount[user_id] || 0) + 1;
         }
         match.previousTurn = user_id;
@@ -1062,7 +1076,7 @@ async function registerDiceRollHandler(io, socket) {
 // validateRequestFields
 // ============================================================================
 function validateRequestFields(socket, diceData) {
-  const requiredFields = ['game_id', 'contest_id', 'session_token', 'device_id', 'jwt_token'];
+  const requiredFields = ['game_id', 'contest_id', 'l_id','user_id'];
   if (!validateRequiredFields(socket, diceData, requiredFields, 'dice:roll:response')) {
     return false;
   }
@@ -1138,9 +1152,9 @@ async function scoreDiceRollAndUpdateResponse(response, match, user_id) {
     const scoreResult = await scoreDiceRoll(user_id, response.dice_number, matchPairId, gameContext);
 
     if (scoreResult.points > 0) {
-      if (match.user1_id === user_id) {
+      if (sameId(match.user1_id, user_id)) {
         match.user1_score = (parseInt(match.user1_score) || 0) + scoreResult.points;
-      } else if (match.user2_id === user_id) {
+      } else if (sameId(match.user2_id, user_id)) {
         match.user2_score = (parseInt(match.user2_score) || 0) + scoreResult.points;
       }
 
@@ -1171,9 +1185,9 @@ async function notifyPlayers(socket, io, game_id, match, response, user_id, resp
     response.turn = match.turn;
     
     // Ensure gets_another_turn is set based on turn
-    if (response.dice_number === 6 && match.turn === user_id && !response.gets_another_turn) {
+    if (response.dice_number === 6 && sameId(match.turn, user_id) && !response.gets_another_turn) {
       response.gets_another_turn = true;
-    } else if (match.turn !== user_id && response.gets_another_turn !== false) {
+    } else if (!sameId(match.turn, user_id) && response.gets_another_turn !== false) {
       response.gets_another_turn = false;
     }
     

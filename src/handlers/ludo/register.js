@@ -2,9 +2,11 @@ const { registerCheckOpponentHandler } = require('./checkOpponentHandler');
 const { registerDiceRollHandler } = require('./diceRollHandler');
 const { registerPieceMoveHandler } = require('./pieceMoveHandler');
 const { registerQuitGameHandler } = require('./quitGameHandler');
+const { registerMatchStateHandler } = require('./matchStateHandler');
 
 const gameHandlers = [
   registerCheckOpponentHandler,
+  registerMatchStateHandler,
   registerDiceRollHandler,
   registerPieceMoveHandler,
   registerQuitGameHandler

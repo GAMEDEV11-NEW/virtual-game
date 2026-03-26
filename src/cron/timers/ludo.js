@@ -10,6 +10,8 @@ const { isMatchCompleted, getOpponentId } = require('../../utils/matchUtils');
 const { toFloat: toNumber } = require('../../utils/dataUtils');
 const { createLudoTimerUpdatePayload } = require('../../utils/timerPayloads');
 const { buildSocketEmitterAdapter } = require('../../utils/socketRelay');
+const { config } = require('../../utils/config');
+const { archiveLudoGameState } = require('../../services/ludo/archiveService');
 
 // ============================================================================
 // State Variables
@@ -20,6 +22,9 @@ let redisClientPromise = null;
 let socketIOInstance = null;
 let ludoTimerIntervalId = null;
 const MATCH_TTL_SECONDS = REDIS_TTL.MATCH_SECONDS;
+let lastHeartbeatLogAt = 0;
+const HEARTBEAT_LOG_INTERVAL_MS = 30000;
+const LUDO_TIMER_MATCH_SCAN_COUNT = Number(process.env.LUDO_TIMER_MATCH_SCAN_COUNT || 10000);
 
 // ============================================================================
 // Initialization Functions
@@ -59,13 +64,13 @@ function startLudoUserTimerCron(intervalMs) {
     clearInterval(ludoTimerIntervalId);
     ludoTimerIntervalId = null;
   }
-  
-  processLudoUserTimers().catch(() => {});
-  
+
+  processLudoUserTimers().catch(() => { });
+
   ludoTimerIntervalId = setInterval(() => {
-    processLudoUserTimers().catch(() => {});
+    processLudoUserTimers().catch(() => { });
   }, intervalMs);
-  
+
   return ludoTimerIntervalId;
 }
 
@@ -84,7 +89,24 @@ async function processLudoUserTimers() {
   const redis = await getRedisClient();
   if (!redis) return;
 
-  const activeGames = await redis.smembers('ludo_active_games');
+  const scanCount = Math.max(1, LUDO_TIMER_MATCH_SCAN_COUNT);
+  const serverId = String(config.serverId || '1');
+  const matchKeys = await redis.scan(`match_server:*:${serverId}`, { count: scanCount });
+  const activeGames = Array.isArray(matchKeys)
+    ? matchKeys
+      .map((key) => String(key || ''))
+      .filter((key) => key.startsWith('match_server:'))
+      .map((key) => key.split(':'))
+      .filter((parts) => parts.length >= 3)
+      .map((parts) => parts[1])
+      .filter(Boolean)
+      .slice(0, scanCount)
+    : [];
+  const nowMs = Date.now();
+  if (nowMs - lastHeartbeatLogAt >= HEARTBEAT_LOG_INTERVAL_MS) {
+    lastHeartbeatLogAt = nowMs;
+    console.log(`[Cron][LudoTimer] heartbeat server_id=${serverId} match_keys=${activeGames.length}`);
+  }
   if (!activeGames || activeGames.length === 0) return;
 
   const now = getCurrentDate();
@@ -92,135 +114,127 @@ async function processLudoUserTimers() {
 
   await processInParallel(activeGames, async (gameId) => {
     try {
-        const matchKey = REDIS_KEYS.MATCH(gameId);
-        const matchData = await redis.get(matchKey);
-        if (!matchData) {
-          await redis.srem('ludo_active_games', gameId);
-          return;
-        }
-        
-        const parsedMatch = safeParseRedisData(matchData);
-        if (!parsedMatch) {
-          await redis.srem('ludo_active_games', gameId);
-          return;
-        }
-        
-        const user1Id = parsedMatch.user1_id;
-        const user2Id = parsedMatch.user2_id;
-        const turn = parsedMatch.turn;
-        const contestType = (parsedMatch.contest_type || '').toLowerCase();
-        if (!gameId || !user1Id || !user2Id || !turn) {
-          return;
-        }
-        
-        if (isMatchCompleted(parsedMatch)) {
-          await redis.srem('ludo_active_games', gameId);
-          return;
-        }
-        
-        if (await isWinnerDeclared(gameId)) {
-          await redis.srem('ludo_active_games', gameId);
-          return;
-        }
-        
-        const user1SocketId = await redis.get(REDIS_KEYS.USER_TO_SOCKET(user1Id));
-        const user2SocketId = await redis.get(REDIS_KEYS.USER_TO_SOCKET(user2Id));
-        
-        const usersToUpdate = [];
-        if (user1SocketId) {
-          usersToUpdate.push({ userId: user1Id, socketId: user1SocketId });
-        }
-        if (user2SocketId) {
-          usersToUpdate.push({ userId: user2Id, socketId: user2SocketId });
-        }
-        
-        if (usersToUpdate.length === 0) {
-          await redis.srem('ludo_active_games', gameId);
-          return;
-        }
+      const matchKey = REDIS_KEYS.MATCH(gameId);
+      const matchData = await redis.get(matchKey);
+      if (!matchData) {
+        return;
+      }
 
-        const user1Time = parsedMatch.user1_time;
-        const user2Time = parsedMatch.user2_time;
-        const startTime = parsedMatch.start_time;
+      const parsedMatch = safeParseRedisData(matchData);
+      if (!parsedMatch) {
+        return;
+      }
 
-        if (shouldHandleStart(user1Time, user2Time, startTime)) {
-          await handleStartState(gameId, matchKey, parsedMatch, now, redis);
-          const latestMatchData = await redis.get(matchKey);
-          const latestParsedMatch = latestMatchData ? safeParseRedisData(latestMatchData) : parsedMatch;
-          await Promise.all(
-            usersToUpdate.map(user => 
-              sendTimerUpdateToSockets(gameId, latestParsedMatch || parsedMatch, user).catch(() => {})
-            )
-          );
-          return;
-        }
+      const user1Id = parsedMatch.user1_id;
+      const user2Id = parsedMatch.user2_id;
+      const turn = parsedMatch.turn;
+      const contestType = (parsedMatch.contest_type || '').toLowerCase();
+      if (!gameId || !user1Id || !user2Id || !turn) {
+        return;
+      }
 
-        let skipDefaultActive = false;
-        if (contestType === 'quick') {
-          const { completed, completedMatchData } = await handleLudoQuickContest(gameId, matchKey, parsedMatch, now, redis);
-          if (completed) {
-            const matchDataForCompletion = completedMatchData || parsedMatch;
-            matchDataForCompletion.status = GAME_STATUS.COMPLETED;
-            
-            await Promise.all(
-              usersToUpdate.map(user => 
-                sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => {})
-              )
-            );
-            
-            await redis.srem('ludo_active_games', gameId);
-            return;
-          }
-        } else if (contestType === 'classic') {
-          const { completed, processedActive, completedMatchData } = await handleLudoClassicContest(gameId, matchKey, parsedMatch, now, redis);
-          if (completed) {
-            const matchDataForCompletion = completedMatchData || parsedMatch;
-            matchDataForCompletion.status = GAME_STATUS.COMPLETED;
-            
-            await Promise.all(
-              usersToUpdate.map(user => 
-                sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => {})
-              )
-            );
-            
-            await redis.srem('ludo_active_games', gameId);
-            return;
-          }
-          skipDefaultActive = processedActive;
-        }
-        
-        if (!skipDefaultActive) {
-          const activeStateResult = await handleActiveState({ redis, gameId, matchData: parsedMatch, turn, user1Id, user2Id, user1Time, user2Time, now });
-          
-          if (activeStateResult && activeStateResult.completed) {
-            const matchDataForCompletion = activeStateResult.completedMatchData || parsedMatch;
-            matchDataForCompletion.status = GAME_STATUS.COMPLETED;
-            
-            await Promise.all(
-              usersToUpdate.map(user => 
-                sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => {})
-              )
-            );
-            
-            await redis.srem('ludo_active_games', gameId);
-            return;
-          }
-        }
-        await handleAllPiecesHome(gameId, user1Id, parsedMatch, matchKey, redis, contestType);
-        await handleAllPiecesHome(gameId, user2Id, parsedMatch, matchKey, redis, contestType);
-        
+      if (isMatchCompleted(parsedMatch)) {
+        return;
+      }
+
+      if (await isWinnerDeclared(gameId)) {
+        return;
+      }
+
+      const user1SocketId = await redis.get(REDIS_KEYS.USER_TO_SOCKET(user1Id));
+      const user2SocketId = await redis.get(REDIS_KEYS.USER_TO_SOCKET(user2Id));
+
+      const usersToUpdate = [];
+      if (user1SocketId) {
+        usersToUpdate.push({ userId: user1Id, socketId: user1SocketId });
+      }
+      if (user2SocketId) {
+        usersToUpdate.push({ userId: user2Id, socketId: user2SocketId });
+      }
+
+      if (usersToUpdate.length === 0) {
+        return;
+      }
+
+      const user1Time = parsedMatch.user1_time;
+      const user2Time = parsedMatch.user2_time;
+      const startTime = parsedMatch.start_time;
+
+      if (shouldHandleStart(user1Time, user2Time, startTime)) {
+        await handleStartState(gameId, matchKey, parsedMatch, now, redis);
         const latestMatchData = await redis.get(matchKey);
         const latestParsedMatch = latestMatchData ? safeParseRedisData(latestMatchData) : parsedMatch;
-        
         await Promise.all(
-          usersToUpdate.map(user => 
-            sendTimerUpdateToSockets(gameId, latestParsedMatch || parsedMatch, user).catch(() => {})
+          usersToUpdate.map(user =>
+            sendTimerUpdateToSockets(gameId, latestParsedMatch || parsedMatch, user).catch(() => { })
           )
         );
-        
-      } catch (err) {
-        // Intentionally ignore per-game failures to avoid stopping the cron loop.
+        return;
       }
+
+      let skipDefaultActive = false;
+      if (contestType === 'quick') {
+        const { completed, completedMatchData } = await handleLudoQuickContest(gameId, matchKey, parsedMatch, now, redis);
+        if (completed) {
+          const matchDataForCompletion = completedMatchData || parsedMatch;
+          matchDataForCompletion.status = GAME_STATUS.COMPLETED;
+
+          await Promise.all(
+            usersToUpdate.map(user =>
+              sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
+            )
+          );
+
+          return;
+        }
+      } else if (contestType === 'classic') {
+        const { completed, processedActive, completedMatchData } = await handleLudoClassicContest(gameId, matchKey, parsedMatch, now, redis);
+        if (completed) {
+          const matchDataForCompletion = completedMatchData || parsedMatch;
+          matchDataForCompletion.status = GAME_STATUS.COMPLETED;
+
+          await Promise.all(
+            usersToUpdate.map(user =>
+              sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
+            )
+          );
+
+          return;
+        }
+        skipDefaultActive = processedActive;
+      }
+
+      if (!skipDefaultActive) {
+        const activeStateResult = await handleActiveState({ redis, gameId, matchData: parsedMatch, turn, user1Id, user2Id, user1Time, user2Time, now });
+
+        if (activeStateResult && activeStateResult.completed) {
+          const matchDataForCompletion = activeStateResult.completedMatchData || parsedMatch;
+          matchDataForCompletion.status = GAME_STATUS.COMPLETED;
+
+          await Promise.all(
+            usersToUpdate.map(user =>
+              sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
+            )
+          );
+
+          return;
+        }
+      }
+      await handleAllPiecesHome(gameId, user1Id, parsedMatch, matchKey, redis, contestType);
+      await handleAllPiecesHome(gameId, user2Id, parsedMatch, matchKey, redis, contestType);
+
+      const latestMatchData = await redis.get(matchKey);
+      const latestParsedMatch = latestMatchData ? safeParseRedisData(latestMatchData) : parsedMatch;
+
+      await Promise.all(
+        usersToUpdate.map(user =>
+          sendTimerUpdateToSockets(gameId, latestParsedMatch || parsedMatch, user).catch(() => { })
+        )
+      );
+
+    } catch (err) {
+      // Intentionally ignore per-game failures to avoid stopping the cron loop.
+    }
   }, 5);
 }
 
@@ -229,157 +243,8 @@ async function processLudoUserTimers() {
 // ============================================================================
 
 async function sendTimerUpdateToSockets(gameId, matchData, user) {
-  if (!socketIOInstance) {
-    return;
-  }
-  
-  try {
-    const { socketId, userId } = user;
-    
-    if (!socketId) {
-      return;
-    }
-    
-    if (!socketIOInstance.sockets.sockets.has(socketId)) {
-      return;
-    }
-    
-    const socket = socketIOInstance.sockets.sockets.get(socketId);
-    if (!socket) {
-      return;
-    }
-    
-    const isGameCompleted = matchData.status === GAME_STATUS.COMPLETED ||
-      matchData.status === 'quit' ||
-      matchData.winner ||
-      matchData.game_end_reason;
-
-    if (isGameCompleted) {
-      if (!socket.connected) {
-        return;
-      }
-      
-      try {
-        if (!socket.connected) {
-          throw new Error('Socket disconnected before emit');
-        }
-        socket.emit('stop:timer_updates', {
-          status: 'game_completed',
-          message: 'Game completed - timer updates stopped',
-          game_id: gameId,
-          game_status: GAME_STATUS.COMPLETED,
-          winner: matchData.winner,
-          completed_at: matchData.completed_at || matchData.updated_at,
-          timestamp: new Date().toISOString()
-        });
-      } catch (err) {
-        return;
-      }
-      
-      try {
-        if (!socket.connected) {
-          throw new Error('Socket disconnected before emit');
-        }
-        socket.emit('timer_stopped', {
-          status: 'stopped',
-          message: 'Timer updates stopped successfully',
-          game_id: gameId,
-          reason: 'game_completed',
-          timestamp: new Date().toISOString()
-        });
-      } catch (err) {
-        return;
-      }
-      
-      try {
-        if (!socket.connected) {
-          throw new Error('Socket disconnected before emit');
-        }
-        const userScores = extractScoresFromMatchData(matchData);
-        const gameStatus = determineGameStatus(matchData);
-        const gameStats = getGameStatistics(matchData);
-        
-        const completionPayload = createLudoTimerUpdatePayload(
-          matchData,
-          null,
-          null,
-          0,
-          0,
-          userScores,
-          gameStatus,
-          gameStats
-        );
-        
-        completionPayload.status = 'game_completed';
-        completionPayload.message = 'Game completed - timer updates stopped';
-        
-        socket.emit('timer_update', completionPayload);
-      } catch (err) {
-        return;
-      }
-      
-      return;
-    }
-    
-    const currentTime = Date.now();
-    let user1TimeSec = calculateRemainingTime(matchData.user1_time, currentTime);
-    let user2TimeSec = calculateRemainingTime(matchData.user2_time, currentTime);
-    
-    if (user1TimeSec === null || user1TimeSec === undefined) {
-      user1TimeSec = 15;
-    }
-    if (user2TimeSec === null || user2TimeSec === undefined) {
-      user2TimeSec = 15;
-    }
-    
-    const redis = await getRedisClient();
-    const chanceKey = REDIS_KEYS.USER_CHANCE(gameId);
-    const chanceRaw = await redis.get(chanceKey);
-    
-    let user1Chance = 0;
-    let user2Chance = 0;
-    
-    if (chanceRaw) {
-      const chances = safeParseRedisData(chanceRaw);
-      if (chances && typeof chances === 'object') {
-        user1Chance = parseInt(chances[matchData.user1_id] || 0, 10);
-        user2Chance = parseInt(chances[matchData.user2_id] || 0, 10);
-      }
-    }
-    
-    if (isNaN(user1Chance)) user1Chance = 0;
-    if (isNaN(user2Chance)) user2Chance = 0;
-    
-    const userScores = extractScoresFromMatchData(matchData);
-    const gameStatus = determineGameStatus(matchData);
-    const gameStats = getGameStatistics(matchData);
-    
-    if (!socket.connected) {
-      return;
-    }
-    
-    const timerPayload = createLudoTimerUpdatePayload(
-      matchData,
-      user1TimeSec,
-      user2TimeSec,
-      user1Chance,
-      user2Chance,
-      userScores,
-      gameStatus,
-      gameStats
-    );
-    
-    try {
-      if (!socket.connected) {
-        throw new Error('Socket disconnected before emit');
-      }
-      socket.emit('timer_update', timerPayload);
-    } catch (err) {
-      return;
-    }
-    
-  } catch (err) {
-  }
+  // Disabled by requirement: do not emit timer events from cron to socket.
+  return;
 }
 
 // ============================================================================
@@ -554,12 +419,9 @@ function getUserTurnCount(matchData, userId) {
 // ============================================================================
 
 async function handleStartState(gameId, matchKey, matchData, now, redis) {
-  const user1Id = matchData.user1_id;
-  const user2Id = matchData.user2_id;
-  await initializeChances(redis, gameId, user1Id, user2Id);
   const live = now.toISOString();
-  matchData.user1_chance = 3;
-  matchData.user2_chance = 3;
+  matchData.user1_chance = Number(matchData.user1_chance ?? 3);
+  matchData.user2_chance = Number(matchData.user2_chance ?? 3);
   matchData.user1_time = live;
   matchData.user2_time = live;
   matchData.last_move_time = live;
@@ -567,21 +429,7 @@ async function handleStartState(gameId, matchKey, matchData, now, redis) {
 }
 
 async function initializeChances(redis, gameId, user1Id, user2Id) {
-  const chanceKey = REDIS_KEYS.USER_CHANCE(gameId);
-  const existing = (await redis.get(chanceKey)) || {};
-  
-  // Only initialize if chances don't already exist (prevent resetting decremented chances)
-  // This ensures players don't get extra chances if initializeChances is called after game starts
-  if (existing[user1Id] === undefined || existing[user1Id] === null) {
-    existing[user1Id] = 3;
-  }
-  if (existing[user2Id] === undefined || existing[user2Id] === null) {
-    existing[user2Id] = 3;
-  }
-  
-  const pipeline = redis.pipeline();
-  pipeline.set(REDIS_KEYS.USER_CHANCE(gameId), JSON.stringify(existing), 'EX', MATCH_TTL_SECONDS);
-  await pipeline.exec();
+  return;
 }
 
 async function handleActiveState({ redis, gameId, matchData, turn, user1Id, user2Id, user1Time, user2Time, now }) {
@@ -591,74 +439,77 @@ async function handleActiveState({ redis, gameId, matchData, turn, user1Id, user
   const ts = new Date(timeStr);
   if (now.getTime() - ts.getTime() <= 15 * 1000) return;
 
-  const chanceKey = REDIS_KEYS.USER_CHANCE(gameId);
-  const chanceData = (await redis.get(chanceKey)) || { [user1Id]: 3, [user2Id]: 3 };
-  const chances = Number(chanceData[userId] || 0);
+  const currentUserChance = userId === user1Id
+    ? Number(matchData.user1_chance ?? 3)
+    : Number(matchData.user2_chance ?? 3);
+  const chances = Number.isNaN(currentUserChance) ? 0 : currentUserChance;
 
   if (chances > 0) {
     const decrementResult = await handleChanceDecrement({
       redis,
       gameId,
       matchData,
-      chanceKey,
-      chanceData,
       userId,
       user1Id,
       user2Id,
       now
     });
-    
+
     // If game ended after chance decrement (chances reached 0), return completed
     if (decrementResult && decrementResult.completed) {
       return decrementResult;
     }
   } else {
     const opponentId = userId === user1Id ? user2Id : user1Id;
-    
+
     matchData.status = GAME_STATUS.COMPLETED;
     matchData.completed_at = toISOString();
     matchData.winner = opponentId;
     matchData.game_end_reason = 'opponent_timeout';
-    
+
     const matchKey = REDIS_KEYS.MATCH(gameId);
     await redis.set(matchKey, JSON.stringify(matchData), MATCH_TTL_SECONDS);
-    
+
     await declareWinnerAtomic(gameId, opponentId, userId, matchData.league_id || '', 'opponent_timeout', matchData);
-    
+
     await completeLudoGame(gameId, matchData, redis);
-    
+
     return { completed: true, completedMatchData: matchData };
   }
-  
+
   return { completed: false };
 }
 
-async function handleChanceDecrement({ redis, gameId, matchData, chanceKey, chanceData, userId, user1Id, user2Id, now }) {
-  const currentChance = Number(chanceData[userId] || 0);
+async function handleChanceDecrement({ redis, gameId, matchData, userId, user1Id, user2Id, now }) {
+  const currentChance = userId === user1Id
+    ? Number(matchData.user1_chance ?? 3)
+    : Number(matchData.user2_chance ?? 3);
   const newChance = Math.max(0, currentChance - 1);
-  chanceData[userId] = newChance;
-  
-  matchData.user1_chance = chanceData[user1Id] || 0;
-  matchData.user2_chance = chanceData[user2Id] || 0;
+  if (userId === user1Id) {
+    matchData.user1_chance = newChance;
+    matchData.user2_chance = Number(matchData.user2_chance ?? 3);
+  } else {
+    matchData.user2_chance = newChance;
+    matchData.user1_chance = Number(matchData.user1_chance ?? 3);
+  }
 
   // If chances reached 0 after decrement, end the game immediately
   if (newChance === 0) {
     const opponentId = userId === user1Id ? user2Id : user1Id;
-    
+
     matchData.status = GAME_STATUS.COMPLETED;
     matchData.completed_at = toISOString();
     matchData.winner = opponentId;
     matchData.game_end_reason = 'opponent_timeout';
-    
+
     const matchKey = REDIS_KEYS.MATCH(gameId);
     const pipeline = redis.pipeline();
-    pipeline.set(REDIS_KEYS.USER_CHANCE(gameId), JSON.stringify(chanceData), 'EX', MATCH_TTL_SECONDS);
     pipeline.set(matchKey, JSON.stringify(matchData), 'EX', MATCH_TTL_SECONDS);
     await pipeline.exec();
-    
+
     await declareWinnerAtomic(gameId, opponentId, userId, matchData.league_id || '', 'opponent_timeout', matchData);
     await completeLudoGame(gameId, matchData, redis);
-    
+
     return { completed: true, completedMatchData: matchData };
   }
 
@@ -671,10 +522,9 @@ async function handleChanceDecrement({ redis, gameId, matchData, chanceKey, chan
   matchData.turn = opponentId;
 
   const pipeline = redis.pipeline();
-  pipeline.set(REDIS_KEYS.USER_CHANCE(gameId), JSON.stringify(chanceData), 'EX', MATCH_TTL_SECONDS);
   pipeline.set(REDIS_KEYS.MATCH(gameId), JSON.stringify(matchData), 'EX', MATCH_TTL_SECONDS);
   await pipeline.exec();
-  
+
   return { completed: false };
 }
 
@@ -684,10 +534,10 @@ async function handleAllPiecesHome(gameId, userId, matchData, key, redis, contes
   const opponentId = userId === matchData.user1_id ? matchData.user2_id : matchData.user1_id;
   const leagueId = matchData.league_id || '';
   const reason = `all_pieces_home_${contestType || 'simple'}`;
-  
+
   await tryDeclareWinner(gameId, async () => {
     await declareWinner(gameId, userId, opponentId, leagueId, reason, matchData);
-  }).catch(() => {});
+  }).catch(() => { });
 
   await completeLudoGame(gameId, matchData, redis);
 }
@@ -701,14 +551,14 @@ async function handleLudoQuickContest(gameId, key, matchData, now, redis) {
   if (!start) {
     return { completed: false };
   }
-  
+
   const elapsed = now.getTime() - start.getTime();
   const fiveMinutes = 5 * 60 * 1000;
-  
+
   if (elapsed >= fiveMinutes) {
     const winnerId = determineWinnerByScore(matchData);
     const loserId = winnerId ? getOpponentId(matchData, winnerId) : null;
-    
+
     if (winnerId && loserId) {
       try {
         await declareWinnerAtomic(gameId, winnerId, loserId, matchData.league_id || '', 'time_up_highest_score', matchData);
@@ -722,7 +572,7 @@ async function handleLudoQuickContest(gameId, key, matchData, now, redis) {
       } catch (err) {
       }
     }
-    
+
     matchData.status = GAME_STATUS.COMPLETED;
     matchData.completed_at = toISOString();
     if (!matchData.winner) {
@@ -731,13 +581,13 @@ async function handleLudoQuickContest(gameId, key, matchData, now, redis) {
     if (!matchData.game_end_reason) {
       matchData.game_end_reason = 'time_up_highest_score';
     }
-    
+
     const matchKey = REDIS_KEYS.MATCH(gameId);
     await redis.set(matchKey, JSON.stringify(matchData), MATCH_TTL_SECONDS);
-    
+
     return { completed: true, completedMatchData: matchData };
   }
-  
+
   return { completed: false };
 }
 
@@ -745,7 +595,7 @@ async function handleLudoClassicContest(gameId, key, matchData, now, redis) {
   const user1Turns = getUserTurnCount(matchData, matchData.user1_id);
   const user2Turns = getUserTurnCount(matchData, matchData.user2_id);
   const minTurnsRequired = 15;
-  
+
   if (user1Turns < minTurnsRequired || user2Turns < minTurnsRequired) {
     const turn = matchData.turn;
     await handleActiveState({
@@ -764,7 +614,7 @@ async function handleLudoClassicContest(gameId, key, matchData, now, redis) {
 
   const winnerId = determineWinnerByScore(matchData);
   const loserId = winnerId ? getOpponentId(matchData, winnerId) : null;
-  
+
   if (!winnerId || !loserId) {
     const user1Id = matchData.user1_id;
     const user2Id = matchData.user2_id;
@@ -772,19 +622,19 @@ async function handleLudoClassicContest(gameId, key, matchData, now, redis) {
   } else {
     await declareWinnerAtomic(gameId, winnerId, loserId, matchData.league_id || '', 'turns_completed_highest_score', matchData);
   }
-  
+
   const finalWinnerId = winnerId || matchData.user1_id;
-  
+
   matchData.status = GAME_STATUS.COMPLETED;
   matchData.completed_at = toISOString();
   matchData.winner = finalWinnerId;
   matchData.game_end_reason = winnerId ? 'turns_completed_highest_score' : 'turns_completed_tie';
-  
+
   const matchKey = REDIS_KEYS.MATCH(gameId);
   await redis.set(matchKey, JSON.stringify(matchData), MATCH_TTL_SECONDS);
-  
+
   await completeLudoGame(gameId, matchData, redis);
-  
+
   return { completed: true, completedMatchData: matchData };
 }
 
@@ -811,12 +661,12 @@ async function declareWinner(gameId, winnerId, loserId, leagueId, reason, matchD
     const errorMsg = `Ludo matchmaking service not initialized for game ${gameId}`;
     throw new Error(errorMsg);
   }
-  
+
   const { processWinnerDeclaration } = require('../../services/ludo/windeclearService');
-  
+
   let scores = { user1Score: 0, user2Score: 0, winnerScore: 0, loserScore: 0 };
   let contestId = '';
-  
+
   if (matchData) {
     scores.user1Score = toNumber(matchData.user1_score || 0);
     scores.user2Score = toNumber(matchData.user2_score || 0);
@@ -834,9 +684,9 @@ async function declareWinner(gameId, winnerId, loserId, leagueId, reason, matchD
       contestId = match.contest_id || match.contest_type || '';
     }
   }
-  
+
   const finalContestId = contestId || leagueId || '';
-  
+
   const result = await processWinnerDeclaration(
     gameId,
     winnerId,
@@ -848,16 +698,16 @@ async function declareWinner(gameId, winnerId, loserId, leagueId, reason, matchD
     scores.user1Score,
     scores.user2Score
   );
-  
+
   if (!result) {
     const errorMsg = `processWinnerDeclaration returned null/undefined for game ${gameId}`;
     throw new Error(errorMsg);
   }
-  
+
   if (result.already_processed) {
     return result;
   }
-  
+
   if (!result.success) {
     const errorParts = [];
     if (result?.error) errorParts.push(result.error);
@@ -871,7 +721,7 @@ async function declareWinner(gameId, winnerId, loserId, leagueId, reason, matchD
     }
     return { success: false, error: fullError };
   }
-  
+
   return result;
 }
 
@@ -882,36 +732,46 @@ async function declareWinner(gameId, winnerId, loserId, leagueId, reason, matchD
 async function completeLudoGame(gameId, matchData, redisInstance) {
   const redis = redisInstance || await getRedisClient();
   const matchKey = REDIS_KEYS.MATCH(gameId);
-  
+
+  try {
+    await archiveLudoGameState(gameId, matchData, 'timer_completion');
+  } catch (_) {
+  }
+
   await redis.del(matchKey);
-  await redis.del(`matchkey_userchance:${gameId}`);
-  
+  try {
+    const matchServerKeys = await redis.scan(`match_server:${String(gameId)}:*`, { count: 100 });
+    if (Array.isArray(matchServerKeys) && matchServerKeys.length > 0) {
+      for (const key of matchServerKeys) {
+        try {
+          await redis.del(key);
+        } catch (_) {
+        }
+      }
+    }
+  } catch (_) {
+  }
+
   // Clear winner declaration key if exists
   try {
     await redis.del(`ludo_winner_declared:${gameId}`);
-  } catch (_) {}
-  
+  } catch (_) { }
+
   // Clear both users' sessions from Redis when game completes
   if (matchData && matchData.user1_id && matchData.user2_id) {
     try {
       const sessionService = require('../../utils/sessionService');
       await sessionService.clearSessionsForMatch(matchData.user1_id, matchData.user2_id);
-    } catch (err) {}
+    } catch (err) { }
   }
-  
+
   // Always update match_pairs to 'completed' when game ends
   if (gameId != null) {
     try {
       const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
-      await updateMatchPairToCompleted(gameId);
+      const { updateMatchPairStatus } = require('../../services/ludo/gameService');
+      await updateMatchPairToCompleted(gameId, updateMatchPairStatus);
     } catch (err) {
-      if (ludoMatchmakingService) {
-        try {
-          await ludoMatchmakingService
-            .getCassandraSession()
-            .execute('UPDATE match_pairs SET status = ?, updated_at = ? WHERE id = ?', ['completed', new Date(), gameId], { prepare: true });
-        } catch (fallbackErr) {}
-      }
     }
   }
 }

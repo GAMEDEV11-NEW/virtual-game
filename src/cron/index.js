@@ -2,7 +2,7 @@
 // Cron job service
 // ============================================================================
 
-const cassandraClient = require('../services/cassandra/client');
+const mysqlClient = require('../services/mysql/client');
 const { TIMER_CONSTANTS } = require('../constants');
 const {
   getLudoLeagueIds,
@@ -12,11 +12,12 @@ const {
 } = require('./config');
 
 const timerModule = require('./timers');
-const { initLevelCacheService, stopLevelCacheService } = require('../services/watersort/levelCacheService');
 
 let ludoMatchmakingService = null;
 let ludoMatchmakingTimerId = null;
 let ludoUserTimerStarted = false;
+let ludoSettlementService = null;
+let ludoSettlementTimerId = null;
 
 let snakesMatchmakingService = null;
 let snakesMatchmakingTimerId = null;
@@ -31,14 +32,10 @@ let watersortMatchmakingTimerId = null;
 let watersortUserTimerStarted = false;
 
 let isRunning = false;
-let cassandraSession = null;
+let mysqlSession = null;
 
 function toCsv(value) {
   return Array.isArray(value) ? value.join(',') : value;
-}
-
-function setSocketIOInstance(io) {
-  if (timerModule.setSocketIO) timerModule.setSocketIO(io);
 }
 
 function startLudoMatchmaking(session) {
@@ -58,6 +55,8 @@ function startLudoMatchmaking(session) {
   ludoMatchmakingTimerId = setInterval(() => {
     ludoMatchmakingService.processMatchmakingForLeagues(ludoLeagueIdsCsv).catch(() => {});
   }, ludoMatchmakingInterval);
+
+  console.log(`[Cron] Ludo matchmaking started (tick=${ludoMatchmakingInterval}ms, leagues=${ludoLeagueIdsCsv})`);
 }
 
 function stopLudoMatchmaking() {
@@ -75,6 +74,22 @@ function startLudoUserTimers() {
   const ludoUserTimerInterval = TIMER_CONSTANTS.USER_TIMER_TICK;
   timerModule.startLudoUserTimerCron(ludoUserTimerInterval);
   ludoUserTimerStarted = true;
+  console.log(`[Cron] Ludo user timer started (tick=${ludoUserTimerInterval}ms)`);
+}
+
+function startLudoSettlement(session) {
+  if (ludoSettlementTimerId) {
+    return;
+  }
+
+  const intervalMs = Number(process.env.LUDO_STALE_SETTLE_TICK_MS || 60000);
+  const { LudoSettlementService } = require('./services/ludoSettlementService');
+  ludoSettlementService = new LudoSettlementService(session);
+
+  ludoSettlementTimerId = setInterval(() => {
+    ludoSettlementService.processStaleEntries().catch(() => {});
+  }, intervalMs);
+  console.log(`[Cron] Ludo settlement started (tick=${intervalMs}ms)`);
 }
 
 function stopLudoUserTimers() {
@@ -84,6 +99,14 @@ function stopLudoUserTimers() {
 
   timerModule.stopLudoUserTimerCron();
   ludoUserTimerStarted = false;
+}
+
+function stopLudoSettlement() {
+  if (ludoSettlementTimerId) {
+    clearInterval(ludoSettlementTimerId);
+    ludoSettlementTimerId = null;
+  }
+  ludoSettlementService = null;
 }
 
 // ============================================================================
@@ -242,26 +265,14 @@ async function initializeCronService(io = null) {
   if (isRunning) {
     return;
   }
+  mysqlSession = await mysqlClient;
 
-  setSocketIOInstance(io || null);
-
-  cassandraSession = await cassandraClient;
-
-  startLudoMatchmaking(cassandraSession);
+  startLudoMatchmaking(mysqlSession);
   startLudoUserTimers();
-
-  startSnakesMatchmaking(cassandraSession);
-  startSnakesUserTimers();
-
-  startTicTacToeMatchmaking(cassandraSession);
-  startTicTacToeUserTimers();
-
-  startWaterSortMatchmaking(cassandraSession);
-  startWaterSortUserTimers();
-
-  initLevelCacheService(cassandraSession);
+  startLudoSettlement(mysqlSession);
 
   isRunning = true;
+  console.log('[Cron] initializeCronService completed');
 }
 
 function stopCronService() {
@@ -271,20 +282,10 @@ function stopCronService() {
 
   stopLudoMatchmaking();
   stopLudoUserTimers();
-
-  stopSnakesMatchmaking();
-  stopSnakesUserTimers();
-
-  stopTicTacToeMatchmaking();
-  stopTicTacToeUserTimers();
-
-  stopWaterSortMatchmaking();
-  stopWaterSortUserTimers();
-
-  stopLevelCacheService();
+  stopLudoSettlement();
 
   isRunning = false;
-  cassandraSession = null;
+  mysqlSession = null;
 }
 
 // ============================================================================
@@ -307,6 +308,5 @@ process.on('SIGTERM', () => {
 
 module.exports = {
   initializeCronService,
-  stopCronService,
-  setSocketIOInstance
+  stopCronService
 };

@@ -6,7 +6,8 @@ const { authenticateOpponent } = require('../utils/authUtils');
 // ============================================================================
 async function withAuth(socket, event, responseEvent, handlerFn) {
   try {
-    const decryptedData = await authenticateOpponent(socket, event, responseEvent, require('../utils/jwt').decryptUserData);
+    // Direct mode: do not decrypt user_data. Accept plain payload + socket user context.
+    const decryptedData = await authenticateOpponent(socket, event, responseEvent);
     
     if (!decryptedData || !decryptedData.user_id) {
       throw new Error('Authentication failed');

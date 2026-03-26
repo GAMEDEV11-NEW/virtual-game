@@ -16,8 +16,7 @@ const TIMER_CONFIG = {
 };
 
 const REDIS_KEYS = {
-  MATCH: SHARED_REDIS_KEYS.MATCH,
-  USER_CHANCE: SHARED_REDIS_KEYS.USER_CHANCE
+  MATCH: SHARED_REDIS_KEYS.MATCH
 };
 
 // ============================================================================
@@ -277,21 +276,12 @@ function calculateGameCountdown(startTime, currentTime) {
 // ============================================================================
 async function fetchUserChances(gameId, matchData) {
   try {
-    if (!gameId || !matchData) {
+    if (!matchData) {
       return { user1Chance: 0, user2Chance: 0 };
     }
-
-    const chanceKey = REDIS_KEYS.USER_CHANCE(gameId);
-    const chanceRaw = await redisClient.get(chanceKey);
-
-    if (!chanceRaw) {
-      return { user1Chance: 0, user2Chance: 0 };
-    }
-
-    const chances = safeParseRedisData(chanceRaw);
     return {
-      user1Chance: chances[matchData.user1_id] || 0,
-      user2Chance: chances[matchData.user2_id] || 0
+      user1Chance: Number(matchData.user1_chance || 0),
+      user2Chance: Number(matchData.user2_chance || 0)
     };
   } catch (err) {
     return { user1Chance: 0, user2Chance: 0 };

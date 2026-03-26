@@ -74,7 +74,7 @@ function registerDisconnectHandler(io, socket) {
       if (userId) {
         await processCommonDisconnect(socket, userId, socket.id, {
           timerHandlerKeys: ['ticTacToeTimerHandler'],
-          cleanupUserToSocket: false
+          cleanupUserToSocket: true
         });
 
         await handleDisconnectionForAllGames(io, userId, reason);

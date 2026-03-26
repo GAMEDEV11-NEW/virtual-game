@@ -372,11 +372,12 @@ async function cleanupRedisMatchData(gameId, gameType, redisKeys) {
     const { getUserChanceKey } = require('../../utils/redis');
     const matchKey = redisKeys.MATCH ? redisKeys.MATCH(gameId) : redisKeys(gameId);
     const userChanceKey = getUserChanceKey(gameId, gameType);
-    
-    await Promise.all([
-      redisClient.del(matchKey),
-      redisClient.del(userChanceKey)
-    ]);
+
+    const operations = [redisClient.del(matchKey)];
+    if (userChanceKey) {
+      operations.push(redisClient.del(userChanceKey));
+    }
+    await Promise.all(operations);
     
     return true;
   } catch (_) {

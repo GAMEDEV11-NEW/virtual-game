@@ -121,6 +121,262 @@ const DB_QUERIES = {
   DELETE_PENDING_BY_STATUS: `
     DELETE FROM pending_league_joins_by_status WHERE user_id = ? AND status_id = ? AND joined_at = ?
   `,
+  LUDO_SELECT_PENDING: `
+    SELECT
+      user_id,
+      league_id,
+      contest_id,
+      joined_at,
+      l_id AS id,
+      status_id,
+      join_day,
+      NULL AS extra_data,
+      game_type,
+      contest_type,
+      server_id,
+      0 AS b_s
+    FROM ludo_game
+    WHERE status = ? AND status_id = ? AND game_type = ? AND league_id IN (%LEAGUE_IDS%) AND server_id = ? AND is_deleted = 0
+    ORDER BY joined_at ASC
+    LIMIT 10000
+  `,
+  LUDO_UPDATE_PENDING_OPPONENT: `
+    UPDATE ludo_game
+    SET opponent_user_id = ?, updated_at = NOW(3)
+    WHERE user_id = ? AND status_id = ? AND join_day = ? AND league_id = ? AND server_id = ? AND joined_at = ? AND is_deleted = 0
+  `,
+  LUDO_DELETE_PENDING: `
+    UPDATE ludo_game
+    SET is_deleted = 1, updated_at = NOW(3)
+    WHERE user_id = ? AND status_id = ? AND join_day = ? AND league_id = ? AND server_id = ? AND joined_at = ? AND is_deleted = 0
+  `,
+  LUDO_EXPIRE_PENDING: `
+    UPDATE ludo_game
+    SET status = ?, status_id = ?, opponent_user_id = NULL, opponent_league_id = NULL, updated_at = NOW(3)
+    WHERE user_id = ? AND status_id = ? AND join_day = ? AND league_id = ? AND server_id = ? AND joined_at = ? AND is_deleted = 0
+  `,
+  LUDO_SELECT_JOIN_BY_LID: `
+    SELECT
+      l_id,
+      user_id,
+      opponent_user_id,
+      opponent_league_id,
+      joined_at,
+      match_id,
+      league_id,
+      turn_id,
+      status,
+      contest_id,
+      is_deleted
+    FROM ludo_game
+    WHERE l_id = ? AND is_deleted = 0
+    LIMIT 1
+  `,
+  LUDO_SELECT_JOIN_BY_LID_START: `
+    SELECT
+      l_id,
+      user_id,
+      opponent_user_id,
+      opponent_league_id,
+      joined_at,
+      match_id,
+      league_id,
+      turn_id,
+      status,
+      contest_id,
+      is_deleted
+    FROM ludo_game
+    WHERE l_id = ? 
+    LIMIT 1
+  `
+  ,
+  LUDO_SELECT_JOIN_BY_USER_CONTEST: `
+    SELECT
+      l_id,
+      user_id,
+      opponent_user_id,
+      opponent_league_id,
+      joined_at,
+      match_id,
+      league_id,
+      turn_id,
+      status,
+      contest_id,
+      is_deleted
+    FROM ludo_game
+    WHERE user_id = ? AND contest_id = ? AND is_deleted = 0
+      AND status IN ('pending', 'matched', 'active')
+    ORDER BY joined_at DESC
+    LIMIT 1
+  `,
+  LUDO_SELECT_COMPLETED_BY_USER: `
+    SELECT
+      l_id,
+      user_id,
+      opponent_user_id,
+      opponent_league_id,
+      joined_at,
+      match_id,
+      league_id,
+      turn_id,
+      status
+    FROM ludo_game
+    WHERE user_id = ? AND is_deleted = 0 AND status = 'completed'
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `,
+  LUDO_SELECT_COMPLETED_BY_LID: `
+    SELECT
+      l_id,
+      user_id,
+      opponent_user_id,
+      opponent_league_id,
+      joined_at,
+      match_id,
+      league_id,
+      turn_id,
+      status
+    FROM ludo_game
+    WHERE l_id = ? AND is_deleted = 0 AND status = 'completed'
+    LIMIT 1
+  `,
+  LUDO_SELECT_MATCH_STATUS: `
+    SELECT status
+    FROM ludo_game
+    WHERE match_id = ? AND is_deleted = 0
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `,
+  LUDO_SELECT_OPPONENT_STATUS_BY_MATCH: `
+    SELECT status
+    FROM ludo_game
+    WHERE user_id = ? AND match_id = ? AND is_deleted = 0
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `,
+  LUDO_UPDATE_STATUS_BY_MATCH: `
+    UPDATE ludo_game
+    SET status = ?, status_id = ?, updated_at = NOW(3)
+    WHERE match_id = ? AND is_deleted = 0
+  `,
+  LUDO_UPDATE_JOIN_BY_LID: `
+    UPDATE ludo_game
+    SET opponent_user_id = ?, opponent_league_id = ?, match_id = ?, turn_id = ?, status = ?, status_id = ?, updated_at = NOW(3)
+    WHERE l_id = ? AND is_deleted = 0
+  `,
+  LUDO_UPDATE_JOIN_STATUS_ONLY_BY_LID: `
+    UPDATE ludo_game
+    SET status = ?, status_id = ?, updated_at = NOW(3)
+    WHERE l_id = ? AND is_deleted = 0
+  `,
+  LUDO_UPDATE_JOIN_EXPIRED_BY_LID: `
+    UPDATE ludo_game
+    SET status = ?, status_id = ?, opponent_user_id = NULL, opponent_league_id = NULL, match_id = NULL, updated_at = NOW(3)
+    WHERE l_id = ? AND is_deleted = 0
+  `,
+  LUDO_SELECT_STALE_UNSETTLED: `
+    SELECT
+      l_id,
+      user_id,
+      contest_id,
+      joined_at,
+      status
+    FROM ludo_game
+    WHERE is_deleted = 0
+      AND joined_at <= (NOW(3) - INTERVAL 1 HOUR)
+      AND status NOT IN ('expired', 'completed', 'cancelled')
+    ORDER BY joined_at ASC
+    LIMIT ?
+  `,
+  LUDO_SETTLE_STALE_BY_LID: `
+    UPDATE ludo_game
+    SET
+      status = ?,
+      status_id = ?,
+      ended_at = COALESCE(ended_at, NOW(3)),
+      updated_at = NOW(3)
+    WHERE l_id = ? AND is_deleted = 0
+      AND status NOT IN ('expired', 'completed', 'cancelled')
+  `,
+  LUDO_UPDATE_ARCHIVE_BY_MATCH: `
+    UPDATE ludo_game
+    SET
+      s3_key = ?,
+      s3_etag = ?,
+      status = ?,
+      status_id = ?,
+      ended_at = COALESCE(ended_at, NOW(3)),
+      updated_at = NOW(3)
+    WHERE match_id = ? AND is_deleted = 0
+  `,
+  LUDO_UPDATE_IDS_BY_LID: `
+    UPDATE ludo_game
+    SET
+      user_dice_id = ?,
+      opponent_dice_id = ?,
+      user_piece_1_id = ?,
+      user_piece_2_id = ?,
+      user_piece_3_id = ?,
+      user_piece_4_id = ?,
+      opponent_piece_1_id = ?,
+      opponent_piece_2_id = ?,
+      opponent_piece_3_id = ?,
+      opponent_piece_4_id = ?,
+      updated_at = NOW(3)
+    WHERE l_id = ? AND is_deleted = 0
+  `,
+  LUDO_UPSERT_JOIN_BY_LID: `
+    INSERT INTO ludo_game (
+      l_id,
+      user_id,
+      contest_id,
+      league_id,
+      joined_at,
+      join_day,
+      status,
+      status_id,
+      opponent_user_id,
+      opponent_league_id,
+      match_id,
+      turn_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      opponent_user_id = VALUES(opponent_user_id),
+      opponent_league_id = VALUES(opponent_league_id),
+      match_id = VALUES(match_id),
+      turn_id = VALUES(turn_id),
+      status = VALUES(status),
+      status_id = VALUES(status_id),
+      updated_at = NOW(3)
+  `,
+  LUDO_UPSERT_PENDING_FROM_SOCKET: `
+    INSERT INTO ludo_game (
+      l_id,
+      user_id,
+      contest_id,
+      league_id,
+      joined_at,
+      join_day,
+      status,
+      status_id,
+      game_type,
+      contest_type,
+      server_id,
+      is_deleted
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ON DUPLICATE KEY UPDATE
+      contest_id = VALUES(contest_id),
+      league_id = VALUES(league_id),
+      joined_at = VALUES(joined_at),
+      join_day = VALUES(join_day),
+      status = VALUES(status),
+      status_id = VALUES(status_id),
+      game_type = VALUES(game_type),
+      contest_type = VALUES(contest_type),
+      server_id = VALUES(server_id),
+      is_deleted = 0,
+      updated_at = NOW(3)
+  `,
   UPDATE_LEAGUE_JOIN: `
     UPDATE league_joins
     SET opponent_user_id = ?, opponent_league_id = ?, match_pair_id = ?, turn_id = ?, status = ?
@@ -132,6 +388,8 @@ const DB_QUERIES = {
   SELECT_LEAGUE_JOIN_EXTRA: `
     SELECT extra_data, entry_fee, id FROM league_joins WHERE user_id = ? AND status_id = ? AND join_month = ?
   `,
+  // Legacy Cassandra lookup table queries.
+  // Ludo MySQL flow now uses LUDO_*_BY_LID queries on ludo_game.
   SELECT_LEAGUE_JOIN_BY_ID: `
     SELECT id, entry_fee, extra_data, invite_code, join_month, joined_at, league_id, match_pair_id, opponent_league_id, opponent_user_id, r_ip, role, status, status_id, turn_id, updated_at, user_id FROM league_joins_by_id WHERE id = ?
   `,
@@ -203,4 +461,3 @@ module.exports = {
   getTodayString,
   getCurrentMonth
 };
-

@@ -381,6 +381,7 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
 // registerPieceMoveHandler
 // ============================================================================
 function registerPieceMoveHandler(io, socket) {
+  socket.removeAllListeners('piece:move');
   socket.on('piece:move', async (event) => {
     // Create response guarantee to ensure user always gets a response
     const responseGuarantee = createResponseGuarantee(socket, 'piece:move:response', 10000);
@@ -944,7 +945,7 @@ function registerPieceMoveHandler(io, socket) {
           }
           
           try {
-            await cleanupRedisMatchData(validatedMoveData.game_id);
+            await cleanupRedisMatchData(validatedMoveData.game_id, finalMatch);
           } catch (err) {
             logHandlerError('cleanupRedisMatchData failed', err, {
               gameID: validatedMoveData.game_id

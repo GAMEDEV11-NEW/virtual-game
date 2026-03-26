@@ -465,8 +465,9 @@ function getUserChanceKey(gameId, gameType = 'ludo') {
     case 'water_sort':
       return REDIS_KEYS.WATERSORT_USER_CHANCE(gameId);
     case 'ludo':
+      return null;
     default:
-      return REDIS_KEYS.USER_CHANCE(gameId);
+      return null;
   }
 }
 

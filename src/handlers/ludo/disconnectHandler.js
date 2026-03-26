@@ -366,16 +366,18 @@ async function cancelFindOpponentProcess(userID, entry) {
 // Handle disconnect logic for a socket
 // ============================================================================
 async function handleSocketDisconnect(io, socket, reason) {
+    const userID = await getUserIDFromSocket(socket);
+    if (!userID) {
+        return;
+    }
+
     try {
-        const userID = await getUserIDFromSocket(socket);
-        if (!userID) {
-            return;
-        }
-
         await cancelFindOpponentIfSearching(userID);
+    } catch (error) {
+    }
 
+    try {
         await cleanupSocketResources(socket, userID);
-
     } catch (error) {
     }
 }
@@ -403,7 +405,7 @@ async function cleanupSocketResources(socket, userID) {
     try {
         await processCommonDisconnect(socket, userID, socket.id, {
             timerHandlerKeys: ['timerHandler'],
-            cleanupUserToSocket: false
+            cleanupUserToSocket: true
         });
     } catch (error) {
     }

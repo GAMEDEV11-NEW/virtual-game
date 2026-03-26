@@ -1,9 +1,7 @@
-const cassandra = require('cassandra-driver');
 const axios = require('axios');
-const { GamePiecesService } = require('../services/piecesService');
-const { WinnerDeclarationService } = require('../services/winnerService');
 const { RedisService, getRedisService } = require('../../utils/redis');
 const { config } = require('../../utils/config');
+const { v4: uuidv4 } = require('uuid');
 
 const SERVER_ID = config.serverId;
 const {
@@ -11,31 +9,33 @@ const {
     REDIS_TTL,
     REDIS_KEYS,
     DB_QUERIES,
-    getContestTypeMaxChances,
-    getTodayString,
-    getCurrentMonth
+    getContestTypeMaxChances
 } = require('../../constants');
 const {
     toDate,
-    safeJSONParse,
-    toFloat,
     getRowValue,
-    normalizeUuid,
     sanitizeLeagueIds,
     resolveOpponentLeagueId,
     toInterfaceSlice
 } = require('../../utils/dataUtils');
 
-const SELECT_PENDING = DB_QUERIES.SELECT_PENDING;
-const INSERT_MATCH_PAIR = DB_QUERIES.INSERT_MATCH_PAIR;
-const INSERT_DICE_LOOKUP = DB_QUERIES.INSERT_DICE_LOOKUP;
-const UPDATE_PENDING_OPPONENT = DB_QUERIES.UPDATE_PENDING_OPPONENT;
-const DELETE_PENDING = DB_QUERIES.DELETE_PENDING;
-const DELETE_PENDING_BY_STATUS = DB_QUERIES.DELETE_PENDING_BY_STATUS;
-const UPDATE_LEAGUE_JOIN = DB_QUERIES.UPDATE_LEAGUE_JOIN;
-const UPDATE_LEAGUE_EXPIRED = DB_QUERIES.UPDATE_LEAGUE_EXPIRED;
-const SELECT_LEAGUE_JOIN_EXTRA = DB_QUERIES.SELECT_LEAGUE_JOIN_EXTRA;
+const LUDO_SELECT_PENDING = DB_QUERIES.LUDO_SELECT_PENDING;
+const LUDO_UPDATE_PENDING_OPPONENT = DB_QUERIES.LUDO_UPDATE_PENDING_OPPONENT;
+const LUDO_DELETE_PENDING = DB_QUERIES.LUDO_DELETE_PENDING;
+const LUDO_EXPIRE_PENDING = DB_QUERIES.LUDO_EXPIRE_PENDING;
+const LUDO_UPDATE_IDS_BY_LID = DB_QUERIES.LUDO_UPDATE_IDS_BY_LID;
 const { updateLeagueJoinById, updateLeagueJoinByIdExpired } = require('../../services/ludo/gameService');
+
+function getRows(result) {
+    if (Array.isArray(result?.[0])) return result[0];
+    if (Array.isArray(result?.rows)) return result.rows;
+    return [];
+}
+
+function getFirstRow(result) {
+    const rows = getRows(result);
+    return rows.length > 0 ? rows[0] : null;
+}
 
 // ============================================================================
 // Matchmaking constants (timings / retries)
@@ -44,22 +44,12 @@ const { updateLeagueJoinById, updateLeagueJoinByIdExpired } = require('../../ser
 const MATCHMAKING_CUTOFF_MS = 10_000;
 const EXPIRY_WARNING_START_OFFSET_MS = 10_000;
 const EXPIRY_WARNING_END_OFFSET_MS = 6_000;
-
-const PIECES_READ_INITIAL_DELAY_MS = 100;
-const PIECES_READ_RETRY_DELAY_MS = 200;
-const PIECES_READ_MAX_RETRIES = 3;
+const MAX_MATCHMAKING_USERS_PER_TICK = Number(process.env.LUDO_MATCHMAKING_MAX_USERS_PER_TICK || 10000);
 
 // ============================================================================
 // Small functional helpers (pure / reusable)
 // ============================================================================
 
-// ============================================================================
-// sleep helper
-// ============================================================================
-
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// ============================================================================
 // pending entry cutoff helpers
 // ============================================================================
 
@@ -162,9 +152,9 @@ class SessionService {
             return null;
         }
         const query = `SELECT user_id, device_id, expires_at, fcm_token, is_active, jwt_token, mobile_no, session_token, updated_at FROM sessions WHERE user_id = ?`;
-        const result = await this.session.execute(query, [userId], { prepare: true });
-        if (result.rowLength === 0) return null;
-        const row = result.first();
+        const result = await this.session.execute(query, [userId]);
+        const row = getFirstRow(result);
+        if (!row) return null;
         if (!row.is_active) return null;
         return row;
     }
@@ -211,11 +201,47 @@ class LudoMatchmakingService {
         this.session = session;
     }
 
-    // ============================================================================
-    // expose cassandra session
-    // ============================================================================
-    getCassandraSession() {
-        return this.session;
+    async _execute(query, params = []) {
+        return this.session.execute(query, params);
+    }
+
+    async removeContestJoinCache(user) {
+        if (!user || !user.userId) return;
+        const redisService = getRedisService();
+        const userId = String(user.userId);
+        const contestId = String(user.contestId || user.leagueId || '');
+        const lid = String(user.id || '');
+
+        const keys = [];
+        if (contestId && lid) {
+            keys.push(`contest_join:${userId}:${contestId}:${lid}`);
+        }
+        if (contestId) {
+            // backward compatibility key patterns
+            keys.push(`contest_join:${contestId}:${userId}`);
+        }
+        keys.push(`contest_join:${userId}`);
+
+        for (const key of keys) {
+            try {
+                await redisService.del(key);
+            } catch (_) {
+            }
+        }
+
+        // Safety cleanup: remove all keys for this user+contest regardless of l_id.
+        if (contestId) {
+            try {
+                const patternKeys = await redisService.scan(`contest_join:${userId}:${contestId}:*`, { count: 200 });
+                for (const key of patternKeys) {
+                    try {
+                        await redisService.del(key);
+                    } catch (_) {
+                    }
+                }
+            } catch (_) {
+            }
+        }
     }
 
     // ============================================================================
@@ -232,8 +258,9 @@ class LudoMatchmakingService {
         return {
             userId,
             leagueId: getRowValue(row, 'league_id'),
+            contestId: getRowValue(row, 'contest_id'),
             joinedAt,
-            id: normalizeUuid(getRowValue(row, 'id')),
+            id: getRowValue(row, 'id') ? String(getRowValue(row, 'id')) : '',
             statusId: getRowValue(row, 'status_id'),
             joinDay: getRowValue(row, 'join_day'),
             extraData: getRowValue(row, 'extra_data'),
@@ -247,20 +274,19 @@ class LudoMatchmakingService {
     // ============================================================================
     // load pending users across join days
     // ============================================================================
-    async _loadPendingUsers(joinDays, leagueIdsArray) {
+    async _loadPendingUsers(leagueIdsArray) {
         const users = [];
+        if (leagueIdsArray.length === 0) return users;
 
-        for (const joinDay of joinDays) {
-            const result = await this.session.execute(
-                SELECT_PENDING,
-                [GAME_STATUS.PENDING, joinDay, leagueIdsArray, SERVER_ID],
-                { prepare: true }
-            );
+        const placeholders = leagueIdsArray.map(() => '?').join(',');
+        const query = LUDO_SELECT_PENDING.replace('%LEAGUE_IDS%', placeholders);
+        const params = ['pending', Number(GAME_STATUS.PENDING), 'ludo', ...leagueIdsArray, String(SERVER_ID)];
+        const result = await this._execute(query, params);
+        const rows = Array.isArray(result?.[0]) ? result[0] : (result?.rows || []);
 
-            for (const row of result.rows) {
-                const user = this._buildPendingUser(row);
-                if (user) users.push(user);
-            }
+        for (const row of rows) {
+            const user = this._buildPendingUser(row);
+            if (user) users.push(user);
         }
 
         return users;
@@ -273,17 +299,16 @@ class LudoMatchmakingService {
         const leagueIdsArray = sanitizeLeagueIds(leagueIds);
         if (leagueIdsArray.length === 0) return;
 
-        const today = new Date();
-        const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-        const joinDays = [getTodayString(today), getTodayString(yesterday)];
-        const pendingUsers = await this._loadPendingUsers(joinDays, leagueIdsArray);
-
         const matchedUsers = new Set();
         const redisService = getRedisService();
         const notifiedUsersKeyPrefix = 'ludo_expiry_notified:';
         const notificationTTL = 15;
         let pendingSlot = null;
         const cutoff = new Date(Date.now() - MATCHMAKING_CUTOFF_MS);
+        const pendingUsersRaw = await this._loadPendingUsers(leagueIdsArray);
+        const pendingUsers = Array.isArray(pendingUsersRaw)
+            ? pendingUsersRaw.slice(0, Math.max(1, MAX_MATCHMAKING_USERS_PER_TICK))
+            : [];
         const expiryWarningStart = new Date(Date.now() - EXPIRY_WARNING_START_OFFSET_MS);
         const expiryWarningEnd = new Date(Date.now() - EXPIRY_WARNING_END_OFFSET_MS);
 
@@ -307,7 +332,7 @@ class LudoMatchmakingService {
                 pendingSlot = null;
             }
 
-            await this.maybeSendExpiryWarning(user, expiryWarningStart, expiryWarningEnd, redisService, notifiedUsersKeyPrefix, notificationTTL);
+            // await this.maybeSendExpiryWarning(user, expiryWarningStart, expiryWarningEnd, redisService, notifiedUsersKeyPrefix, notificationTTL);
 
             if (matchedUsers.has(user.userId)) continue;
             if (!pendingSlot) {
@@ -333,7 +358,8 @@ class LudoMatchmakingService {
             await expireSafe(pendingSlot);
             return;
         }
-        await this.maybeSendExpiryWarning(pendingSlot, expiryWarningStart, expiryWarningEnd, redisService, notifiedUsersKeyPrefix, notificationTTL);
+        // Disabled for current flow: keep function for system-user flow reference.
+        // await this.maybeSendExpiryWarning(pendingSlot, expiryWarningStart, expiryWarningEnd, redisService, notifiedUsersKeyPrefix, notificationTTL);
     }
 
     // ============================================================================
@@ -345,42 +371,38 @@ class LudoMatchmakingService {
         }
 
         const matchPairId = await this.createMatchPairEntry(user1, user2);
-        const piecesSvc = new GamePiecesService(this.session);
-        const startingPosition = ['quick', 'classic'].includes(user1.contestType) ? 1 : 0;
-        await Promise.all([
-            piecesSvc.createPiecesForMatch(matchPairId, user1.userId, user2.userId, startingPosition),
-            this.createDiceRolls(matchPairId, user1.userId, user2.userId)
-        ]);
 
-        await sleep(PIECES_READ_INITIAL_DELAY_MS);
-
-        let user1Pieces, user2Pieces, user1Dice, user2Dice;
-        let retries = 0;
-
-        while (retries < PIECES_READ_MAX_RETRIES) {
-            [user1Pieces, user2Pieces, user1Dice, user2Dice] = await Promise.all([
-                piecesSvc.getUserPieces(matchPairId, user1.userId),
-                piecesSvc.getUserPieces(matchPairId, user2.userId),
-                piecesSvc.getUserDice(matchPairId, user1.userId),
-                piecesSvc.getUserDice(matchPairId, user2.userId)
-            ]);
-
-            if (user1Pieces && user1Pieces.length > 0 && user2Pieces && user2Pieces.length > 0) {
-                break;
+        const buildInitialPieces = (userId, count = 4) => {
+            const pieces = [];
+            for (let i = 1; i <= count; i += 1) {
+                pieces.push({
+                    game_id: matchPairId,
+                    user_id: userId,
+                    move_number: 0,
+                    piece_id: uuidv4(),
+                    player_id: '',
+                    from_pos_last: 'initial',
+                    to_pos_last: 'initial',
+                    piece_type: `piece_${i}`,
+                    captured_piece: '',
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                });
             }
+            return pieces;
+        };
 
-            if (retries < PIECES_READ_MAX_RETRIES - 1) {
-                await sleep(PIECES_READ_RETRY_DELAY_MS);
-            }
-            retries++;
-        }
+        const user1PiecesIface = toInterfaceSlice(buildInitialPieces(user1.userId));
+        const user2PiecesIface = toInterfaceSlice(buildInitialPieces(user2.userId));
+        const user1DiceIface = toInterfaceSlice([{ dice_id: uuidv4(), created_at: new Date().toISOString() }]);
+        const user2DiceIface = toInterfaceSlice([{ dice_id: uuidv4(), created_at: new Date().toISOString() }]);
 
-        const user1DiceIface = toInterfaceSlice(user1Dice || []);
-        const user2DiceIface = toInterfaceSlice(user2Dice || []);
-        const user1PiecesIface = toInterfaceSlice(user1Pieces || []);
-        const user2PiecesIface = toInterfaceSlice(user2Pieces || []);
-
-        await this.updateUsersAndPending(user1, user2, matchPairId);
+        await this.updateUsersAndPending(user1, user2, matchPairId, {
+            user1Pieces: user1PiecesIface,
+            user2Pieces: user2PiecesIface,
+            user1Dice: user1DiceIface,
+            user2Dice: user2DiceIface
+        });
         await this.storeLudoMatch(matchPairId, user1, user2, {
             user1Pieces: user1PiecesIface,
             user2Pieces: user2PiecesIface,
@@ -395,46 +417,15 @@ class LudoMatchmakingService {
     // create base match pair entry
     // ============================================================================
     async createMatchPairEntry(user1, user2) {
-        const matchPairId = cassandra.types.TimeUuid.now().toString();
-        const now = new Date();
-        const user1PendingId = user1.id || user1.userId;
-        const user2PendingId = user2.id || user2.userId;
-        await this.session.execute(
-            INSERT_MATCH_PAIR,
-            [matchPairId, user1PendingId, user2PendingId, user1.userId, user2.userId, GAME_STATUS.ACTIVE, now, now],
-            { prepare: true }
-        );
+        const matchPairId = uuidv4();
+        // Match metadata/status is now tracked in ludo_game via updateLeagueJoinById().
         return matchPairId;
-    }
-
-    // ============================================================================
-    // create dice roll lookup rows
-    // ============================================================================
-    async createDiceRolls(matchPairId, user1Id, user2Id) {
-        const now = new Date();
-        const [user1DiceId, user2DiceId] = [
-            cassandra.types.TimeUuid.now(),
-            cassandra.types.TimeUuid.now()
-        ];
-
-        await Promise.all([
-            this.session.execute(
-                INSERT_DICE_LOOKUP,
-                [matchPairId, user1Id, user1DiceId, now],
-                { prepare: true }
-            ),
-            this.session.execute(
-                INSERT_DICE_LOOKUP,
-                [matchPairId, user2Id, user2DiceId, now],
-                { prepare: true }
-            )
-        ]);
     }
 
     // ============================================================================
     // update users and cleanup pending queues
     // ============================================================================
-    async updateUsersAndPending(user1, user2, matchPairId) {
+    async updateUsersAndPending(user1, user2, matchPairId, ids = {}) {
         let turnId1 = 1;
         let turnId2 = 2;
         if (!(user1.joinedAt < user2.joinedAt)) {
@@ -442,47 +433,63 @@ class LudoMatchmakingService {
             turnId2 = 1;
         }
 
-        await this.updateUserWithOpponent(user1, user2.userId, matchPairId, turnId1, user2.leagueId);
-        await this.updateUserWithOpponent(user2, user1.userId, matchPairId, turnId2, user1.leagueId);
+        await this.updateUserWithOpponent(user1, user2.userId, matchPairId, turnId1, user2.leagueId, {
+            userDice: ids.user1Dice,
+            opponentDice: ids.user2Dice,
+            userPieces: ids.user1Pieces,
+            opponentPieces: ids.user2Pieces
+        });
+        await this.updateUserWithOpponent(user2, user1.userId, matchPairId, turnId2, user1.leagueId, {
+            userDice: ids.user2Dice,
+            opponentDice: ids.user1Dice,
+            userPieces: ids.user2Pieces,
+            opponentPieces: ids.user1Pieces
+        });
 
         await this.updatePendingOpponent(user1, user2.userId);
         await this.updatePendingOpponent(user2, user1.userId);
 
         await this.deletePending(user1);
         await this.deletePending(user2);
+
+        // Keep redis contest-join cache in sync after match creation.
+        await this.removeContestJoinCache(user1);
+        await this.removeContestJoinCache(user2);
     }
 
     // ============================================================================
     // write user opponent details into league join
     // ============================================================================
-    async updateUserWithOpponent(user, opponentUserId, matchPairId, turnId, opponentLeagueId) {
-        const joinMonth = getCurrentMonth(user.joinedAt);
+    async updateUserWithOpponent(user, opponentUserId, matchPairId, turnId, opponentLeagueId, ids = {}) {
         const resolvedLeagueId = resolveOpponentLeagueId(opponentLeagueId, user.leagueId);
-        await this.session.execute(
-            UPDATE_LEAGUE_JOIN,
-            [
-                opponentUserId,
-                resolvedLeagueId,
-                matchPairId,
-                turnId,
-                GAME_STATUS.MATCHED,
-                user.userId,
-                user.statusId,
-                joinMonth,
-                user.joinedAt
-            ],
-            { prepare: true }
-        );
 
-        // Also update league_joins_by_id for fast lookups
+        // Primary match linkage/state in ludo_game
         if (user.id) {
             try {
                 await updateLeagueJoinById(user.id, opponentUserId, GAME_STATUS.MATCHED, {
                     matchPairId: matchPairId,
                     turnId: turnId,
-                    opponentLeagueId: resolvedLeagueId,
-                    statusId: user.statusId
+                    opponentLeagueId: resolvedLeagueId
                 });
+
+                const userDiceId = ids.userDice?.[0]?.dice_id || null;
+                const opponentDiceId = ids.opponentDice?.[0]?.dice_id || null;
+                const userPieceIds = Array.isArray(ids.userPieces) ? ids.userPieces.map((p) => p?.piece_id || null) : [];
+                const opponentPieceIds = Array.isArray(ids.opponentPieces) ? ids.opponentPieces.map((p) => p?.piece_id || null) : [];
+
+                await this._execute(LUDO_UPDATE_IDS_BY_LID, [
+                    userDiceId,
+                    opponentDiceId,
+                    userPieceIds[0] || null,
+                    userPieceIds[1] || null,
+                    userPieceIds[2] || null,
+                    userPieceIds[3] || null,
+                    opponentPieceIds[0] || null,
+                    opponentPieceIds[1] || null,
+                    opponentPieceIds[2] || null,
+                    opponentPieceIds[3] || null,
+                    user.id
+                ]);
             } catch (err) {
             }
         }
@@ -493,10 +500,9 @@ class LudoMatchmakingService {
     // ============================================================================
     async updatePendingOpponent(user, opponentUserId) {
         const serverId = user.serverId || SERVER_ID;
-        await this.session.execute(
-            UPDATE_PENDING_OPPONENT,
-            [opponentUserId, user.statusId, user.joinDay, user.leagueId, serverId, user.joinedAt],
-            { prepare: true }
+        await this._execute(
+            LUDO_UPDATE_PENDING_OPPONENT,
+            [opponentUserId, user.userId, user.statusId, user.joinDay, user.leagueId, String(serverId), user.joinedAt]
         );
     }
 
@@ -504,11 +510,10 @@ class LudoMatchmakingService {
     // delete pending entries
     // ============================================================================
     async deletePending(user) {
-        const serverId = user.serverId || SERVER_ID;
-        await Promise.all([
-            this.session.execute(DELETE_PENDING, [user.statusId, user.joinDay, user.leagueId, serverId, user.joinedAt], { prepare: true }),
-            this.session.execute(DELETE_PENDING_BY_STATUS, [user.userId, user.statusId, user.joinedAt], { prepare: true })
-        ]);
+        // In MySQL single-table ludo flow, pending/matched/active live in the same row.
+        // Marking pending rows as deleted here removes matched rows from check:opponent lookups.
+        // Keep as no-op.
+        return;
     }
 
     // ============================================================================
@@ -543,14 +548,10 @@ class LudoMatchmakingService {
             league_id: user1.leagueId
         };
         await redisService.set(REDIS_KEYS.MATCH(matchPairId), matchData, REDIS_TTL.MATCH_SECONDS);
-        await redisService.set(
-            REDIS_KEYS.USER_CHANCE(matchPairId),
-            {
-                [user1.userId]: maxChances,
-                [user2.userId]: maxChances
-            },
-            REDIS_TTL.MATCH_SECONDS
-        );
+        await redisService.set(`match_server:${String(matchPairId)}:${String(user1.serverId || SERVER_ID)}`, {
+            game_id: String(matchPairId),
+            server_id: String(user1.serverId || SERVER_ID)
+        }, REDIS_TTL.MATCH_SECONDS);
     }
 
     // ============================================================================
@@ -595,13 +596,13 @@ class LudoMatchmakingService {
                                     redis_port, redis_username, socket_url, sys_user_id, team_name, team_size, user_ip, webhook_url 
                                     FROM bot_user_ids 
                                     WHERE user_id = ? AND status = ?`;
-                    const botResult = await this.session.execute(botQuery, [userId.toString(), false], { prepare: true });
-
-                    if (botResult.rowLength === 0) {
+                    const botResult = await this._execute(botQuery, [userId.toString(), false]);
+                    const botRow = getFirstRow(botResult);
+                    if (!botRow) {
                         continue; // No bot found for this ID, try next
                     }
 
-                    const row = botResult.first();
+                    const row = botRow;
                     const sysUserIdString = row.sys_user_id && typeof row.sys_user_id === 'object' && row.sys_user_id.toString ? row.sys_user_id.toString() : String(row.sys_user_id || '');
                     const botUserData = {
                         user_id: sysUserIdString,
@@ -626,10 +627,9 @@ class LudoMatchmakingService {
                     let sessionData = null;
                     try {
                         const sessionQuery = `SELECT jwt_token, device_id, fcm_token, mobile_no, session_token FROM sessions WHERE user_id = ?`;
-                        const sessionResult = await this.session.execute(sessionQuery, [botUserData.user_id], { prepare: true });
-
-                        if (sessionResult.rowLength > 0) {
-                            const sessionRow = sessionResult.first();
+                        const sessionResult = await this._execute(sessionQuery, [botUserData.user_id]);
+                        const sessionRow = getFirstRow(sessionResult);
+                        if (sessionRow) {
                             sessionData = {
                                 jwt_token: sessionRow.jwt_token || '',
                                 device_id: sessionRow.device_id || '',
@@ -704,23 +704,26 @@ class LudoMatchmakingService {
     // ============================================================================
     async expirePending(user) {
         try {
-            await this.processExpiredEntryRefund(user);
-        } catch (err) {
-        }
-        const joinMonth = getCurrentMonth(user.joinedAt);
-        const serverId = user.serverId || SERVER_ID;
-        await Promise.all([
-            this.session.execute(DELETE_PENDING, [user.statusId, user.joinDay, user.leagueId, serverId, user.joinedAt], { prepare: true }),
-            this.session.execute(DELETE_PENDING_BY_STATUS, [user.userId, user.statusId, user.joinedAt], { prepare: true }),
-            this.session.execute(UPDATE_LEAGUE_EXPIRED, [GAME_STATUS.EXPIRED, user.userId, user.statusId, joinMonth, user.joinedAt], { prepare: true })
-        ]);
-
-        // Also update league_joins_by_id for fast lookups
-        if (user.id) {
             try {
-                await updateLeagueJoinByIdExpired(user.id, GAME_STATUS.EXPIRED, user.statusId);
+                await this.processExpiredEntryRefund(user);
             } catch (err) {
             }
+            const serverId = user.serverId || SERVER_ID;
+            await this._execute(
+                LUDO_EXPIRE_PENDING,
+                [GAME_STATUS.EXPIRED, 6, user.userId, user.statusId, user.joinDay, user.leagueId, String(serverId), user.joinedAt]
+            );
+
+            // Also update league_joins_by_id for fast lookups
+            if (user.id) {
+                try {
+                    await updateLeagueJoinByIdExpired(user.id, GAME_STATUS.EXPIRED);
+                } catch (err) {
+                }
+            }
+        } finally {
+            // Always attempt cache cleanup even if DB update fails.
+            await this.removeContestJoinCache(user);
         }
     }
 
@@ -728,70 +731,22 @@ class LudoMatchmakingService {
     // trigger refund for expired entry
     // ============================================================================
     async processExpiredEntryRefund(user) {
-        const entryFee = await this.getEntryFeeFromLeagueJoins(user);
-        if (entryFee <= 0) return;
-        const winnerService = new WinnerDeclarationService(this.session);
-        await winnerService.processExpiredEntryRefund(user.userId, entryFee, user.joinedAt);
-    }
+        const refundApiUrl = (process.env.LUDO_REFUND_API_URL || '').trim();
+        if (!refundApiUrl) return;
 
-    // ============================================================================
-    // read entry fee for a league join
-    // ============================================================================
-    async getEntryFeeFromLeagueJoins(user) {
-        const joinMonth = getCurrentMonth(user.joinedAt);
-        const result = await this.session.execute(
-            SELECT_LEAGUE_JOIN_EXTRA,
-            [user.userId, user.statusId, joinMonth],
-            { prepare: true }
-        );
+        const payload = {
+            user_id: String(user.userId || ''),
+            l_id: String(user.id || ''),
+            contest_id: String(user.leagueId || ''),
+            league_id: String(user.leagueId || ''),
+            reason: 'matchmaking_timeout_refund',
+            joined_at: user.joinedAt ? new Date(user.joinedAt).toISOString() : new Date().toISOString()
+        };
 
-        if (result.rows.length === 0) {
-            return 0;
-        }
-
-        const userEntryId = user.id ? normalizeUuid(user.id) : null;
-        let matchedRow = null;
-
-        if (userEntryId) {
-            matchedRow = result.rows.find(row => {
-                const rowId = normalizeUuid(getRowValue(row, 'id'));
-                return rowId === userEntryId;
-            });
-        }
-
-        if (!matchedRow && user.joinedAt) {
-            matchedRow = result.rows.find(row => {
-                const rowJoinedAt = getRowValue(row, 'joined_at');
-                return rowJoinedAt && rowJoinedAt.getTime && rowJoinedAt.getTime() === user.joinedAt.getTime();
-            });
-        }
-
-        if (!matchedRow && result.rows.length > 0) {
-            matchedRow = result.rows[0];
-        }
-
-        if (!matchedRow) {
-            return 0;
-        }
-
-        const entryFeeColumn = getRowValue(matchedRow, 'entry_fee');
-        if (entryFeeColumn !== null && entryFeeColumn !== undefined) {
-            const entryFee = toFloat(entryFeeColumn);
-            if (entryFee > 0) {
-                return entryFee;
-            }
-        }
-
-        const extraData = getRowValue(matchedRow, 'extra_data');
-        const parsed = safeJSONParse(extraData);
-        if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'entry_fee')) {
-            const entryFee = toFloat(parsed.entry_fee);
-            if (entryFee > 0) {
-                return entryFee;
-            }
-        }
-
-        return 0;
+        await axios.post(refundApiUrl, payload, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: Number(process.env.LUDO_REFUND_API_TIMEOUT_MS || 5000)
+        });
     }
 }
 

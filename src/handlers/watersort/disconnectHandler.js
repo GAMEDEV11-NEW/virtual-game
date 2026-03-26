@@ -16,7 +16,7 @@ function registerDisconnectHandler(io, socket) {
       if (userId) {
         await processCommonDisconnect(socket, userId, socket.id, {
           timerHandlerKeys: ['waterSortTimerHandler'],
-          cleanupUserToSocket: false
+          cleanupUserToSocket: true
         });
       }
 

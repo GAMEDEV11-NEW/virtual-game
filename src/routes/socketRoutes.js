@@ -1,6 +1,5 @@
 // Ludo handlers
 const registerLudoHandlers = require('../handlers/ludo/register');
-const registerLudoTimer = require('../handlers/ludo/timerUpdateHandler');
 const { registerDisconnectHandler: registerLudoDisconnect } = require('../handlers/ludo/disconnectHandler');
 
 // Snakes & Ladders handlers
@@ -22,12 +21,7 @@ const { registerDisconnectHandler: registerWSORTDisconnect } = require('../handl
 const { registerHeartbeatHandler } = require('../handlers/common/heartbeatHandler');
 
 module.exports = function registerSocketHandlers(io) {
-  // Log total connections
-  let connectionCount = 0;
-  
   io.on('connection', (socket) => {
-    connectionCount++;
-    const userId = socket.user?.user_id || 'anonymous';
     const timestamp = new Date().toISOString();
     
     // Send immediate response when client connects
@@ -47,7 +41,6 @@ module.exports = function registerSocketHandlers(io) {
     
     // Register different handler groups
     registerLudoHandlers(io, socket);
-    const timerHandler = registerLudoTimer(io, socket);
 
     // Snakes and Ladders game handlers
     registerSnakesLaddersHandlers(io, socket);
@@ -62,7 +55,6 @@ module.exports = function registerSocketHandlers(io) {
     const waterSortTimerHandler = registerWSORTimer(io, socket);
     
     // Store timer handler references for cleanup
-    socket.timerHandler = timerHandler;
     socket.snakesLaddersTimerHandler = snakesLaddersTimerHandler;
     socket.ticTacToeTimerHandler = ticTacToeTimerHandler;
     socket.waterSortTimerHandler = waterSortTimerHandler;
@@ -73,8 +65,7 @@ module.exports = function registerSocketHandlers(io) {
     registerTTTDisconnect(io, socket);
     registerWSORTDisconnect(io, socket);
 
-    socket.on('disconnect', (reason) => {
-      connectionCount--;
+    socket.on('disconnect', () => {
       // domain-specific cleanup handled in disconnect handler
     });
   });

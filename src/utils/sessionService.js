@@ -1,6 +1,14 @@
 const { redis } = require('./redis');
 const { toISOString, addMsToISO } = require('./dateUtils');
-const cassandraClient = require('../services/cassandra/client');
+const axios = require('axios');
+
+function buildApiErrorMessage(err) {
+  if (!err) return 'Unknown session API error';
+  const responseMessage = err.response?.data?.message || err.response?.data?.error;
+  if (responseMessage) return String(responseMessage);
+  if (err.code === 'ECONNABORTED') return 'Session API timeout';
+  return err.message || 'Session API request failed';
+}
 
 // ============================================================================
 // Parses boolean value from various types
@@ -31,82 +39,153 @@ function parseSession(session) {
 }
 
 // ============================================================================
-// Gets user session from Redis cache or database
+// Resolves session payload from various API response shapes
+// ============================================================================
+function extractSessionPayload(apiData) {
+  if (!apiData) return null;
+  if (apiData.session && typeof apiData.session === 'object') return apiData.session;
+  if (apiData.data && typeof apiData.data === 'object') {
+    if (apiData.data.session && typeof apiData.data.session === 'object') return apiData.data.session;
+    return apiData.data;
+  }
+  if (typeof apiData === 'object') return apiData;
+  return null;
+}
+
+// ============================================================================
+// Maps API session payload to local session schema
+// ============================================================================
+function mapApiSessionToLocal(payload, userId) {
+  if (!payload || typeof payload !== 'object') return null;
+  const now = new Date();
+
+  return {
+    session_token: payload.session_token || payload.token || '',
+    mobile_no: payload.mobile_no || '',
+    user_id: payload.user_id || userId,
+    device_id: payload.device_id || '',
+    fcm_token: payload.fcm_token || '',
+    jwt_token: payload.jwt_token || '',
+    socket_id: payload.socket_id || '',
+    is_active: parseBoolean(payload.is_active),
+    created_at: payload.created_at || payload.updated_at || now.toISOString(),
+    expires_at: payload.expires_at || '0001-01-01T00:00:00.000Z',
+    user_status: payload.user_status || 'existing_user',
+    connected_at: payload.connected_at || '0001-01-01T00:00:00.000Z',
+    last_seen: payload.last_seen || now.toISOString(),
+    user_agent: payload.user_agent || '',
+    ip_address: payload.ip_address || '',
+    namespace: payload.namespace || '',
+    app_type: payload.app_type || '',
+    add_seen: payload.add_seen || 0
+  };
+}
+
+// ============================================================================
+// Gets session from external API
+// ============================================================================
+async function fetchSessionFromApi(userId) {
+  const baseUrl = (process.env.SESSION_API_BASE_URL || '').trim();
+  const endpoint = (process.env.SESSION_API_ENDPOINT || '/sessions/{userId}').trim();
+  const method = (process.env.SESSION_API_METHOD || 'GET').toUpperCase();
+  const timeout = Number(process.env.SESSION_API_TIMEOUT_MS || 5000);
+
+  if (!baseUrl) {
+    return null;
+  }
+
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const path = normalizedEndpoint.includes('{userId}')
+    ? normalizedEndpoint.replace('{userId}', encodeURIComponent(String(userId)))
+    : `${normalizedEndpoint}?user_id=${encodeURIComponent(String(userId))}`;
+  const url = `${normalizedBaseUrl}${path}`;
+
+  const headers = {};
+  if (process.env.SESSION_API_BEARER_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.SESSION_API_BEARER_TOKEN}`;
+  }
+  if (process.env.SESSION_API_KEY) {
+    headers['x-api-key'] = process.env.SESSION_API_KEY;
+  }
+
+  const reqConfig = { url, method, headers, timeout };
+  if (method !== 'GET') {
+    reqConfig.data = { user_id: userId };
+  }
+
+  try {
+    const response = await axios(reqConfig);
+    const payload = extractSessionPayload(response.data);
+    const session = mapApiSessionToLocal(payload, userId);
+    if (!session || !session.is_active) return null;
+    return session;
+  } catch (err) {
+    const message = buildApiErrorMessage(err);
+    const wrapped = new Error(message);
+    wrapped.cause = err;
+    throw wrapped;
+  }
+}
+
+// ============================================================================
+// Gets user session from Redis cache, then API; throws on API/lookup issues
+// ============================================================================
+async function getSessionOrThrow(userId, options = {}) {
+  const { skipRedisRead = true } = options;
+  if (!userId) {
+    throw new Error('Missing user_id');
+  }
+
+  if (!skipRedisRead) {
+    const key = getSessionKey(userId);
+    const data = await redis.get(key);
+    if (data) {
+      let session;
+      if (typeof data === 'string') {
+        try {
+          session = JSON.parse(data);
+        } catch (_) {
+        }
+      } else if (typeof data === 'object') {
+        session = data;
+      }
+      if (session) {
+        return parseSession(session);
+      }
+    }
+  }
+
+  const baseUrl = (process.env.SESSION_API_BASE_URL || '').trim();
+  if (!baseUrl) {
+    throw new Error('Session API is not configured');
+  }
+
+  const session = await fetchSessionFromApi(userId);
+  if (!session) {
+    throw new Error('Session not found or inactive');
+  }
+
+  return parseSession(session);
+}
+
+// ============================================================================
+// Gets user session from Redis cache or API
 // ============================================================================
 async function getSession(userId) {
   if (!userId) {
     return null;
   }
 
-  const key = getSessionKey(userId);
-  const data = await redis.get(key);
-
-  if (data) {
-    let session;
-    if (typeof data === 'string') {
-      try {
-        session = JSON.parse(data);
-      } catch (err) {
-      }
-    } else if (typeof data === 'object') {
-      session = data;
-    }
-
-    if (session) {
-      return parseSession(session);
-    }
-  }
-
   try {
-    const query = `SELECT user_id, device_id, expires_at, fcm_token, is_active, jwt_token, mobile_no, session_token, updated_at, app_type, add_seen FROM sessions WHERE user_id = ?`;
-    const result = await cassandraClient.execute(query, [userId], { prepare: true });
-
-    if (result.rowLength === 0) {
-      return null;
-    }
-
-    const row = result.first();
-    if (!row.is_active) {
-      return null;
-    }
-
-    const now = new Date();
-    const expiresAt = row.expires_at ? row.expires_at.toISOString?.() || new Date(row.expires_at).toISOString() : '0001-01-01T00:00:00.000Z';
-
-    const session = {
-      session_token: row.session_token || '',
-      mobile_no: row.mobile_no || '',
-      user_id: row.user_id || userId,
-      device_id: row.device_id || '',
-      fcm_token: row.fcm_token || '',
-      jwt_token: row.jwt_token || '',
-      socket_id: '',
-      is_active: row.is_active || false,
-      created_at: row.updated_at?.toISOString?.() || now.toISOString(),
-      expires_at: expiresAt,
-      user_status: 'existing_user',
-      connected_at: '0001-01-01T00:00:00.000Z',
-      last_seen: now.toISOString(),
-      user_agent: '',
-      ip_address: '',
-      namespace: '',
-      app_type: row.app_type || '',
-      add_seen: row.add_seen || 0
-    };
-
-    await redis.set(key, JSON.stringify(session));
-    if (session.session_token && session.session_token !== userId) {
-      await redis.set(getSessionKey(session.session_token), JSON.stringify(session));
-    }
-
-    return parseSession(session);
+    return await getSessionOrThrow(userId, { skipRedisRead: true });
   } catch (err) {
     return null;
   }
 }
 
 // ============================================================================
-// Fetches session directly from Cassandra and refreshes Redis cache
+// Fetches session directly from API and refreshes Redis cache
 // ============================================================================
 async function getSessionFromDb(userId) {
   if (!userId) {
@@ -114,48 +193,7 @@ async function getSessionFromDb(userId) {
   }
 
   try {
-    const query = `SELECT user_id, device_id, expires_at, fcm_token, is_active, jwt_token, mobile_no, session_token, updated_at, app_type, add_seen FROM sessions WHERE user_id = ?`;
-    const result = await cassandraClient.execute(query, [userId], { prepare: true });
-
-    if (result.rowLength === 0) {
-      return null;
-    }
-
-    const row = result.first();
-    if (!row.is_active) {
-      return null;
-    }
-
-    const now = new Date();
-    const expiresAt = row.expires_at ? row.expires_at.toISOString?.() || new Date(row.expires_at).toISOString() : '0001-01-01T00:00:00.000Z';
-
-    const session = {
-      session_token: row.session_token || '',
-      mobile_no: row.mobile_no || '',
-      user_id: row.user_id || userId,
-      device_id: row.device_id || '',
-      fcm_token: row.fcm_token || '',
-      jwt_token: row.jwt_token || '',
-      socket_id: '',
-      is_active: row.is_active || false,
-      created_at: row.updated_at?.toISOString?.() || now.toISOString(),
-      expires_at: expiresAt,
-      user_status: 'existing_user',
-      connected_at: '0001-01-01T00:00:00.000Z',
-      last_seen: now.toISOString(),
-      user_agent: '',
-      ip_address: '',
-      namespace: '',
-      app_type: row.app_type || '',
-      add_seen: row.add_seen || 0
-    };
-
-    await redis.set(getSessionKey(userId), JSON.stringify(session));
-    if (session.session_token && session.session_token !== userId) {
-      await redis.set(getSessionKey(session.session_token), JSON.stringify(session));
-    }
-
-    return parseSession(session);
+    return await getSessionOrThrow(userId, { skipRedisRead: true });
   } catch (err) {
     return null;
   }
@@ -165,18 +203,11 @@ async function getSessionFromDb(userId) {
 // Updates session socket ID internally
 // ============================================================================
 async function updateSessionSocketIdInternal(userId, socketId) {
-  const key = getSessionKey(userId);
   const session = await getSession(userId);
   if (!session) return false;
   if (!session.is_active) {
     return false;
   }
-  session.socket_id = socketId;
-  session.last_seen = toISOString();
-  await redis.set(key, JSON.stringify(session));
-
-  // Database UPDATE removed - sessions are now stored only in Redis
-
   return true;
 }
 
@@ -202,7 +233,6 @@ async function createSession(sessionData) {
   if (!sessionKeyId) {
     throw new Error('createSession requires user_id or session_token');
   }
-  const key = getSessionKey(sessionKeyId);
   const now = new Date();
   const expiresAt = sessionData.expires_at ? toISOString(sessionData.expires_at) : addMsToISO(20 * 60 * 1000);
 
@@ -227,13 +257,6 @@ async function createSession(sessionData) {
     add_seen: sessionData.add_seen || 0
   };
 
-  await redis.set(key, JSON.stringify(session));
-  if (session.session_token && session.session_token !== sessionKeyId) {
-    await redis.set(getSessionKey(session.session_token), JSON.stringify(session));
-  }
-
-  // Database INSERT removed - sessions are now stored only in Redis
-
   return session;
 }
 
@@ -241,31 +264,7 @@ async function createSession(sessionData) {
 // Clears user session from Redis
 // ============================================================================
 async function clearSession(userId) {
-  if (!userId) {
-    return false;
-  }
-  
-  try {
-    const key = getSessionKey(userId);
-    const session = await getSession(userId);
-    
-    if (session) {
-      // Delete by user_id
-      await redis.del(key);
-      
-      // Also delete by session_token if different
-      if (session.session_token && session.session_token !== userId) {
-        await redis.del(getSessionKey(session.session_token));
-      }
-      
-      // Delete lookup key
-      await redis.del(`user_session_lookup:${userId}`);
-    }
-    
-    return true;
-  } catch (err) {
-    return false;
-  }
+  return Boolean(userId);
 }
 
 // ============================================================================
@@ -285,6 +284,7 @@ async function clearSessionsForMatch(user1Id, user2Id) {
 
 module.exports = {
   getSession,
+  getSessionOrThrow,
   getSessionFromDb,
   updateSessionSocketId,
   updateSessionSocketIdForReconnect,

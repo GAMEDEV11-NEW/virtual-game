@@ -8,7 +8,10 @@
     "dev": "nodemon --no-deprecation src/server.js",
     "start:server": "node --no-deprecation src/server.js --no-cron",
     "start:cron": "node --no-deprecation src/cron-worker.js",
+    "mock:apis": "node scripts/mock-auth-apis.js",
+    "test:socket-connect": "node scripts/test-socket-connect.js",
     "test:aurora": "node scripts/test-aurora.js",
+    "test:s3": "node scripts/test-s3.js",
     "dev:server": "nodemon --no-deprecation src/server.js --no-cron",
     "dev:cron": "nodemon --no-deprecation src/cron-worker.js",
     "backup-schema": "node src/database/backupSchema.js"
@@ -23,9 +26,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1016.0",
     "@fastify/cors": "^8.4.0",
     "@fastify/helmet": "^10.0.0",
-    "aws-sdk": "^2.1693.0",
     "axios": "^1.13.2",
     "cassandra-driver": "^4.6.4",
     "dotenv": "^16.3.1",

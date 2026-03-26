@@ -1,8 +1,40 @@
 // ============================================================================
 // Authenticates opponent user from socket data
 // ============================================================================
+function normalizeRequestData(data) {
+  let payload = data;
+
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (Array.isArray(payload)) {
+    payload = payload[0];
+  }
+
+  if (payload && typeof payload === 'object') {
+    if (payload.data && typeof payload.data === 'object') {
+      payload = payload.data;
+    } else if (payload.payload && typeof payload.payload === 'object') {
+      payload = payload.payload;
+    }
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  return payload;
+}
+
 async function authenticateOpponent(socket, data, eventName, decryptUserData) {
-  if (!data || typeof data !== 'object') {
+  const payload = normalizeRequestData(data);
+
+  if (!payload) {
     socket.emit(eventName, {
       status: 'error',
       error_code: 'missing_field',
@@ -13,9 +45,9 @@ async function authenticateOpponent(socket, data, eventName, decryptUserData) {
     return null;
   }
 
-  const { user_data, jwt_token } = data;
+  const { user_data, jwt_token } = payload;
 
-  if (user_data && jwt_token) {
+  if (user_data && jwt_token && typeof decryptUserData === 'function') {
     try {
       const decrypted = decryptUserData(user_data, jwt_token);
 
@@ -35,13 +67,13 @@ async function authenticateOpponent(socket, data, eventName, decryptUserData) {
     }
   }
 
-  const hasUserId = data.user_id || (socket.user && socket.user.user_id);
+  const hasUserId = payload.user_id || (socket.user && socket.user.user_id);
 
   if (hasUserId) {
     const mergedData = {
-      ...data,
-      user_id: data.user_id || socket.user.user_id,
-      jwt_token: data.jwt_token || jwt_token,
+      ...payload,
+      user_id: payload.user_id || socket.user.user_id,
+      jwt_token: payload.jwt_token || jwt_token,
     };
 
     return mergedData;

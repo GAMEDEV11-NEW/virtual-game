@@ -110,7 +110,7 @@ function registerDisconnectHandler(io, socket) {
       if (userId) {
         await processCommonDisconnect(socket, userId, socket.id, {
           timerHandlerKeys: ['snakesLaddersTimerHandler'],
-          cleanupUserToSocket: false
+          cleanupUserToSocket: true
         });
 
         await handleDisconnectionForAllGames(io, userId, reason, socket.id);

@@ -17,15 +17,20 @@ if (global.gc) {
 
 async function startCronWorker() {
   try {
-    const cassandraClient = require('./services/cassandra/client');
-    await cassandraClient;
+    console.log('[CronWorker] starting...');
+    const mysqlClient = require('./services/mysql/client');
+    await mysqlClient;
+    console.log('[CronWorker] mysql connected');
 
     const { getRedis } = require('./utils/redis');
     await getRedis();
+    console.log('[CronWorker] redis connected');
 
     const { initializeCronService } = require('./cron');
     await initializeCronService(null);
+    console.log('[CronWorker] cron service initialized');
   } catch (_) {
+    console.error('[CronWorker] failed to start');
     process.exit(1);
   }
 }
