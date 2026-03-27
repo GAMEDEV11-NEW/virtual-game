@@ -41,7 +41,7 @@ function getFirstRow(result) {
 // Matchmaking constants (timings / retries)
 // ============================================================================
 
-const MATCHMAKING_CUTOFF_MS = 10_000;
+const MATCHMAKING_CUTOFF_MS = 20_000;
 const EXPIRY_WARNING_START_OFFSET_MS = 10_000;
 const EXPIRY_WARNING_END_OFFSET_MS = 6_000;
 const MAX_MATCHMAKING_USERS_PER_TICK = Number(process.env.LUDO_MATCHMAKING_MAX_USERS_PER_TICK || 10000);

@@ -59,6 +59,107 @@ function sameNormalizedId(a, b) {
   return normalizeId(a) !== '' && normalizeId(a) === normalizeId(b);
 }
 
+async function getContestJoinSnapshotFromRedis(userId, contestId, lId) {
+  const normalizedUserId = normalizeId(userId);
+  const normalizedContestId = normalizeId(contestId);
+  const normalizedLid = normalizeId(lId);
+  if (!normalizedUserId || !normalizedContestId) return null;
+
+  const keysToTry = [];
+  if (normalizedLid) {
+    keysToTry.push(`contest_join:${normalizedUserId}:${normalizedContestId}:${normalizedLid}`);
+  }
+  keysToTry.push(`contest_join:${normalizedUserId}:${normalizedContestId}`);
+  keysToTry.push(`contest_join:${normalizedUserId}`);
+
+  for (const key of keysToTry) {
+    try {
+      const value = await redisClient.get(key);
+      const parsed = safeParseRedisData(value);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch (_) {
+    }
+  }
+
+  // Fallback pattern scan to support mixed/legacy keys.
+  try {
+    const patternKeys = await redisClient.scan(`contest_join:${normalizedUserId}:${normalizedContestId}:*`, { count: 50 });
+    for (const key of patternKeys) {
+      try {
+        const value = await redisClient.get(key);
+        const parsed = safeParseRedisData(value);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch (_) {
+      }
+    }
+  } catch (_) {
+  }
+
+  return null;
+}
+
+function mapContestJoinSnapshotToEntry(snapshot, fallback = {}) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return {
+    UserID: snapshot.user_id || fallback.user_id || '',
+    OpponentUserID: snapshot.opponent_user_id || '',
+    OpponentLeagueID: snapshot.opponent_league_id || '',
+    JoinedAt: snapshot.joined_at || null,
+    MatchPairID: snapshot.match_id || snapshot.match_pair_id || '',
+    TurnID: snapshot.turn_id || null,
+    LeagueID: snapshot.league_id || fallback.contest_id || '',
+    ID: snapshot.l_id || fallback.l_id || '',
+    status: snapshot.status || 'pending'
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function hydrateEntryFromRedisMatch(entry, userId) {
+  if (!entry) return entry;
+  const matchPairID = normalizeId(entry.MatchPairID);
+  if (!matchPairID) return entry;
+
+  try {
+    const matchRaw = await redisClient.get(REDIS_KEYS.MATCH(matchPairID));
+    const match = safeParseRedisData(matchRaw);
+    if (!match || typeof match !== 'object') return entry;
+
+    const normalizedUserId = normalizeId(userId);
+    const user1 = normalizeId(match.user1_id);
+    const user2 = normalizeId(match.user2_id);
+
+    if (!normalizeId(entry.OpponentUserID)) {
+      if (normalizedUserId && normalizedUserId === user1) {
+        entry.OpponentUserID = user2 || entry.OpponentUserID;
+      } else if (normalizedUserId && normalizedUserId === user2) {
+        entry.OpponentUserID = user1 || entry.OpponentUserID;
+      }
+    }
+
+    if (!entry.TurnID && match.turn) {
+      entry.TurnID = match.turn;
+    }
+  } catch (_) {
+  }
+
+  return entry;
+}
+
+async function getLeagueJoinEntryWithRetry(userId, contestId, lId, attempts = 3, waitMs = 120) {
+  let latest = await getLeagueJoinEntry(userId, contestId, '', lId);
+  for (let i = 1; i < attempts; i++) {
+    if (latest && normalizeId(latest.MatchPairID) && hasValidOpponent(latest)) {
+      return latest;
+    }
+    await sleep(waitMs);
+    latest = await getLeagueJoinEntry(userId, contestId, '', lId);
+  }
+  return latest;
+}
+
 
 // ============================================================================
 // Water sort state initialization
@@ -605,7 +706,15 @@ async function handleCheckOpponent(socket, data) {
   const { user_id, contest_id, l_id } = payload;
   const gameType = (payload.game_type || 'ludo').toString().toLowerCase();
 
-  const entry = await getLeagueJoinEntry(user_id, contest_id, '', l_id);
+  // Redis-first fast path to reduce DB load for repeated polling.
+  const contestSnapshot = await getContestJoinSnapshotFromRedis(user_id, contest_id, l_id);
+  let entry = mapContestJoinSnapshotToEntry(contestSnapshot, { user_id, contest_id, l_id });
+  entry = await hydrateEntryFromRedisMatch(entry, user_id);
+
+  if (!(entry && normalizeId(entry.MatchPairID) && hasValidOpponent(entry))) {
+    // DB fallback when redis snapshot is missing/incomplete.
+    entry = await getLeagueJoinEntryWithRetry(user_id, contest_id, l_id);
+  }
 
   if (!entry) {
     const completedRow = await findCompletedEntry({ userId: user_id, leagueJoinId: l_id });
@@ -634,6 +743,8 @@ async function handleCheckOpponent(socket, data) {
     emitPendingOpponentResponse(socket, { UserID: user_id }, 'Waiting for opponent match...');
     return;
   }
+
+  entry = await hydrateEntryFromRedisMatch(entry, user_id);
 
   const normalizedMatchPairId = normalizeId(entry.MatchPairID);
   if (!entry.UserID || !normalizedMatchPairId) {

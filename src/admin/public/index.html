@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin Dashboard</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="header-row">
+      <div>
+        <h1>Admin Dashboard</h1>
+        <div class="sub">Live + Historic view</div>
+      </div>
+      <button id="logoutBtn" class="danger" type="button" style="display:none">Logout</button>
+    </div>
+
+    <div id="loginCard" class="mt card auth-card">
+      <div class="k">Login</div>
+      <div class="auth-row">
+        <input id="loginUser" type="text" placeholder="Username" autocomplete="username" />
+        <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password" />
+        <button id="loginBtn" type="button">Sign In</button>
+      </div>
+      <div id="loginError" class="login-error"></div>
+    </div>
+
+    <div id="dashboardRoot" style="display:none">
+    <div class="mt card">
+      <div class="k">Service State</div>
+      <pre id="service" class="mono"></pre>
+    </div>
+
+    <div class="mt card toolbar">
+      <div class="tab-buttons">
+        <button id="tabLive" class="tab-btn active" type="button">Live</button>
+        <button id="tabHistoric" class="tab-btn" type="button">Historic</button>
+      </div>
+      <div class="controls">
+        <input id="searchInput" type="text" placeholder="Search match/user/contest..." />
+        <select id="pageSizeSelect">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <div class="mt">
+      <div class="k title-gap">Live Data</div>
+      <div id="liveCards" class="grid"></div>
+    </div>
+    <div class="mt" id="liveSection">
+      <div class="k title-gap">Active Matches (Live)</div>
+      <table id="liveTable">
+        <thead>
+          <tr><th>Game</th><th>Status</th><th>User1</th><th>User2</th><th>Turn</th><th>Updated</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="mt" id="historicSection" style="display:none">
+      <div class="k title-gap">Historic Status Counts</div>
+      <table id="historicStatusTable">
+        <thead>
+          <tr><th>Status</th><th>Count</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="mt">
+      <div class="k title-gap">Historic Matches</div>
+      <table id="historicTable">
+        <thead>
+          <tr><th>Match</th><th>Status</th><th>User</th><th>Opponent</th><th>Contest</th><th>Ended</th><th>S3 Key</th><th>Updated</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="mt card pager">
+      <button id="prevBtn" type="button">Prev</button>
+      <span id="pageInfo" class="mono"></span>
+      <button id="nextBtn" type="button">Next</button>
+    </div>
+    </div>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

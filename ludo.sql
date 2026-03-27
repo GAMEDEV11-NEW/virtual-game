@@ -59,3 +59,7 @@ CREATE TABLE ludo_game (
   KEY idx_match_lookup (match_id),
   KEY idx_opponent_lid (opponent_l_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+
+
