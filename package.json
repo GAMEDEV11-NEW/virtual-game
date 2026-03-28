@@ -11,6 +11,7 @@
     "start:admin": "node --no-deprecation src/admin-worker.js",
     "mock:apis": "node scripts/mock-auth-apis.js",
     "test:socket-connect": "node scripts/test-socket-connect.js",
+    "test:ludo-flow": "node scripts/test-ludo-flow.js",
     "test:aurora": "node scripts/test-aurora.js",
     "test:s3": "node scripts/test-s3.js",
     "dev:server": "nodemon --no-deprecation src/server.js --no-cron",

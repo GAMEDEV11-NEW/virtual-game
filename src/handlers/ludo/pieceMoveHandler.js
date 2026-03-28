@@ -5,7 +5,7 @@ const withAuth = require('../../middleware/withAuth');
 const { grantHomeReachExtraTurn } = require('../../services/ludo/homeReachService');
 const { GAME_CONFIG, ERROR_MESSAGES, ERROR_CODES, ERROR_TYPES } = require('../../config/gameConfig');
 const { performKill } = require('../../services/ludo/killService');
-const { fetchMatchOrEmitError, validateRequiredFields, emitStandardError, saveMatchState, saveMatchFields, notifyOpponent, safeParseRedisData } = require('../../utils/gameUtils');
+const { fetchMatchOrEmitError, validateRequiredFields, emitStandardError, saveMatchState, notifyOpponent, safeParseRedisData } = require('../../utils/gameUtils');
 const { createResponseGuarantee } = require('../../utils/responseGuarantee');
 const { findActiveOpponentSocketId } = require('../../helpers/common/gameHelpers');
 const { REDIS_KEYS, GAME_STATUS } = require('../../constants');
@@ -15,7 +15,12 @@ const { timerRegistry, timerEventBus } = require('../../utils/timer');
 // logHandlerError
 // ============================================================================
 function logHandlerError(context, error, metadata = {}) {
-  return;
+  if (process.env.PIECE_MOVE_DEBUG === 'true') {
+    console.error('[piece:move]', context, {
+      message: error?.message || String(error || ''),
+      ...metadata
+    });
+  }
 }
 
 function normalizeIdValue(value) {
@@ -468,7 +473,7 @@ function registerPieceMoveHandler(io, socket) {
 
       const playerPieces = (sameId(user.user_id, match.user1_id)) ? (match.user1_pieces || []) : (match.user2_pieces || []);
       const opponentPieces = (sameId(user.user_id, match.user1_id)) ? (match.user2_pieces || []) : (match.user1_pieces || []);
-      evaluateMoveAgainstBoard({
+      const boardEval = evaluateMoveAgainstBoard({
         fromPos,
         toPos,
         playerPieces,
@@ -477,6 +482,17 @@ function registerPieceMoveHandler(io, socket) {
         homePosition: HOME_POSITION,
         movedPieceId: validatedMoveData.piece_id,
       });
+
+      if (boardEval && boardEval.isValid === false) {
+        emitStandardError(socket, {
+          code: ERROR_CODES.ILLEGAL_MOVE,
+          type: ERROR_TYPES.GAME,
+          field: 'to_pos_last',
+          message: ERROR_MESSAGES.GAME.ILLEGAL_MOVE
+        }, 'piece:move:response');
+        responseGuarantee.markAsSent();
+        return;
+      }
       
 
       const moveResult = await processPieceMoveAction(validatedMoveData, user.user_id);
@@ -806,7 +822,7 @@ function registerPieceMoveHandler(io, socket) {
         try {
           await saveMatchState(redisClient, validatedMoveData.game_id, finalMatch);
           
-          const verifyMatch = await redisClient.get(`match:${validatedMoveData.game_id}`);
+          const verifyMatch = await redisClient.get(REDIS_KEYS.MATCH(validatedMoveData.game_id));
           if (verifyMatch) {
             const parsedMatch = safeParseRedisData(verifyMatch);
             if (parsedMatch) {
@@ -975,7 +991,7 @@ function registerPieceMoveHandler(io, socket) {
           }
 
           try {
-            const finalVerifyMatch = await redisClient.get(`match:${validatedMoveData.game_id}`);
+            const finalVerifyMatch = await redisClient.get(REDIS_KEYS.MATCH(validatedMoveData.game_id));
             if (finalVerifyMatch) {
               const parsedFinalMatch = safeParseRedisData(finalVerifyMatch);
               if (parsedFinalMatch && parsedFinalMatch.status !== 'completed') {
@@ -985,7 +1001,7 @@ function registerPieceMoveHandler(io, socket) {
                 parsedFinalMatch.completed_at = winnerInfo.timestamp;
                 parsedFinalMatch.game_end_reason = 'all_pieces_home';
                 
-                await redisClient.set(`match:${validatedMoveData.game_id}`, JSON.stringify(parsedFinalMatch));
+                await redisClient.set(REDIS_KEYS.MATCH(validatedMoveData.game_id), JSON.stringify(parsedFinalMatch));
               } else if (!parsedFinalMatch) {
                 logHandlerError('final redis verification parse returned null', new Error('parse failure'), {
                   gameID: validatedMoveData.game_id

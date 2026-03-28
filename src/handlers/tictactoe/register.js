@@ -1,7 +1,9 @@
+const { registerCheckOpponentHandler } = require('./checkOpponentHandler');
 const { registerMakeMoveHandler } = require('./makeMoveHandler');
 const { registerQuitGameHandler } = require('./quitGameHandler');
 
 const ticTacToeGameHandlers = [
+  registerCheckOpponentHandler,
   registerMakeMoveHandler,
   registerQuitGameHandler,
 ];

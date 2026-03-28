@@ -32,7 +32,12 @@ function sameId(a, b) {
 // logDiceHandlerError
 // ============================================================================
 function logDiceHandlerError(context, error, metadata = {}) {
-  return;
+  if (process.env.DICE_HANDLER_DEBUG === 'true') {
+    console.error('[dice:roll]', context, {
+      message: error?.message || String(error || ''),
+      ...metadata
+    });
+  }
 }
 
 // ============================================================================
@@ -228,15 +233,6 @@ function getConsecutiveSixKey(match, user_id) {
 }
 
 // ============================================================================
-// shouldLoseTurnForConsecutiveSix
-// ============================================================================
-function shouldLoseTurnForConsecutiveSix(match, user_id) {
-  const consecutiveSixKey = getConsecutiveSixKey(match, user_id);
-  const consecutiveCount = match[consecutiveSixKey] || 0;
-  return consecutiveCount >= 3;
-}
-
-// ============================================================================
 // getTotalRollsKey
 // ============================================================================
 function getTotalRollsKey(match, user_id) {
@@ -411,22 +407,8 @@ function handleInvalidUser(socket, user_id) {
     code: 'invalid_user',
     type: 'data',
     field: 'user_id',
-    message: 'User not part of this match',
-    event: 'dice:roll:response',
-  });
-}
-
-// ============================================================================
-// handleTimerExpired
-// ============================================================================
-function handleTimerExpired(socket, user_id, timerKey) {
-  emitStandardError(socket, {
-    code: 'timer_expired',
-    type: 'game',
-    field: timerKey,
-    message: 'Your timer has expired. Cannot roll dice.',
-    event: 'timer_expired',
-  });
+    message: 'User not part of this match'
+  }, 'dice:roll:response');
 }
 
 // ============================================================================
@@ -436,9 +418,8 @@ function handleNotUserTurn(socket, user_id) {
   emitStandardError(socket, {
     code: 'turn_expired',
     type: 'game',
-    message: 'It is not your turn.',
-    event: 'turn_expired',
-  });
+    message: 'It is not your turn.'
+  }, 'dice:roll:response');
 }
 
 // ============================================================================
@@ -456,16 +437,14 @@ async function handleTurnTimeout(socket, match, user_id, timeKey, opponentTimeKe
     emitStandardError(socket, {
       code: 'turn_timeout',
       type: 'game',
-      message: 'Turn forfeited due to timeout',
-      event: 'timer_expired',
-    });
+      message: 'Turn forfeited due to timeout'
+    }, 'dice:roll:response');
   } catch (err) {
     emitStandardError(socket, {
       code: 'timeout_error',
       type: 'system',
-      message: err.message || 'Failed to handle turn timeout',
-      event: 'timer_expired',
-    });
+      message: err.message || 'Failed to handle turn timeout'
+    }, 'dice:roll:response');
   }
 }
 
@@ -477,17 +456,16 @@ async function tryProcessDiceRoll(socket, processDiceRoll, params, user_id, matc
     const response = await processDiceRoll(params, user_id, match);
     return response;
   } catch (err) {
-    const errorMsg = err?.message || 
-                     (typeof err === 'string' ? err : String(err)) || 
-                     'Failed to roll dice';
+    const errorMsg = err?.message ||
+      (typeof err === 'string' ? err : String(err)) ||
+      'Failed to roll dice';
     emitStandardError(socket, {
       code: 'verification_error',
       type: 'system',
       field: 'dice_roll',
       message: errorMsg,
-      event: 'dice:roll:response',
-      status: 'error',
-    });
+      status: 'error'
+    }, 'dice:roll:response');
     return null;
   }
 }
@@ -501,11 +479,6 @@ function validateGameState(socket, match, user_id) {
 
   if (!timerKey) {
     handleInvalidUser(socket, user_id);
-    return { isValid: false };
-  }
-
-  if (match[timerKey] <= 0) {
-    handleTimerExpired(socket, user_id, timerKey);
     return { isValid: false };
   }
 
@@ -546,9 +519,8 @@ async function checkTurnTimeout(socket, match, user_id, game_id) {
     emitStandardError(socket, {
       code: 'timeout_check_error',
       type: 'system',
-      message: err.message || 'Failed to check turn timeout',
-      event: 'timer_expired',
-    });
+      message: err.message || 'Failed to check turn timeout'
+    }, 'dice:roll:response');
     return { hasTimeout: true };
   }
 }
@@ -639,43 +611,43 @@ async function checkIfAllPiecesNeedLessThanSix(game_id, user_id, match, diceNumb
   const HOME_POSITION = 57;
   try {
     const pieces = await getUserPieces(game_id, user_id, match);
-    
+
     if (!pieces || pieces.length === 0) {
       return { needsLess: false, minDistance: null };
     }
-    
+
     let allNeedLess = true;
     let minDistance = null;
     let hasMovablePieces = false;
-    
+
     for (const piece of pieces) {
       const atHome = !piece.from_pos_last || piece.to_pos_last === 'initial';
       const atGoal = piece.to_pos_last === 'goal' || piece.to_pos_last === 'finished';
-      
+
       if (atHome || atGoal) {
         continue;
       }
-      
+
       hasMovablePieces = true;
       const currentPosition = normalizePiecePosition(piece.to_pos_last || piece.from_pos_last);
       if (currentPosition === null) {
         continue;
       }
-      
+
       const distanceToHome = HOME_POSITION - currentPosition;
-      
+
       if (distanceToHome >= diceNumber) {
         allNeedLess = false;
         break;
       }
-      
+
       if (distanceToHome > 0) {
         if (minDistance === null || distanceToHome < minDistance) {
           minDistance = distanceToHome;
         }
       }
     }
-    
+
     return { needsLess: allNeedLess && hasMovablePieces && minDistance !== null, minDistance };
   } catch (err) {
     return { needsLess: false, minDistance: null };
@@ -767,7 +739,7 @@ function handleAllPiecesAtHomeLogic(match, user_id, response, canStartWithSix, o
 // ============================================================================
 // handleSubsequentRoll
 // ============================================================================
-function handleSubsequentRoll(match, user_id, response, canMoveAfterRoll, shouldPassTurnBeforeRoll, opponentId) {
+function handleSubsequentRoll(match, user_id, response, canMoveAfterRoll, opponentId) {
   const updatedNow = new Date();
   const consecutiveSixKey = getConsecutiveSixKey(match, user_id);
 
@@ -843,22 +815,22 @@ async function manageTurnLogic(match, user_id, response, pieceCheck) {
         response.gets_another_turn = false;
         response.turn_passed = false;
       } else {
-          if (response.dice_number === 6) {
-            match.turn = user_id;
-            match.user1_time = new Date().toISOString();
-            match.user2_time = new Date().toISOString();
-            response.can_move_pieces = false;
-            response.turn_passed = false;
-            response.gets_another_turn = true;
-            response.message = `Rolled 6 but no legal move; extra roll granted`;
-          } else {
-            match.turn = opponentId;
-            match.user1_time = new Date().toISOString();
-            match.user2_time = new Date().toISOString();
-            response.gets_another_turn = false;
-            response.turn_passed = true;
-          }
+        if (response.dice_number === 6) {
+          match.turn = user_id;
+          match.user1_time = new Date().toISOString();
+          match.user2_time = new Date().toISOString();
+          response.can_move_pieces = false;
+          response.turn_passed = false;
+          response.gets_another_turn = true;
+          response.message = `Rolled 6 but no legal move; extra roll granted`;
+        } else {
+          match.turn = opponentId;
+          match.user1_time = new Date().toISOString();
+          match.user2_time = new Date().toISOString();
+          response.gets_another_turn = false;
+          response.turn_passed = true;
         }
+      }
 
       return;
     }
@@ -867,216 +839,138 @@ async function manageTurnLogic(match, user_id, response, pieceCheck) {
   if (isFirstSixNotRolled) {
     handleFirstTimeRoll(match, user_id, response, canMoveAfterRoll, opponentId);
   } else {
-    handleSubsequentRoll(match, user_id, response, canMoveAfterRoll, pieceCheck.shouldPassTurnBeforeRoll, opponentId);
+    handleSubsequentRoll(match, user_id, response, canMoveAfterRoll, opponentId);
   }
 
 }
 
+async function processDiceRollFlow(io, socket, user, diceData, responseGuarantee) {
+  if (!validateRequestFields(socket, diceData)) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
+  const game_id = normalizeIdValue(diceData.game_id), user_id = normalizeIdValue(diceData.user_id || user.user_id);
+  const match = await fetchMatchOrEmitError(socket, game_id, redisClient, 'dice:roll:response');
+  if (!match) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
+  if (isGameCompleted(socket, match)) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
-// ============================================================================
-// registerDiceRollHandler
-// ============================================================================
-async function registerDiceRollHandler(io, socket) {
-  socket.removeAllListeners('dice:roll');
-  socket.on('dice:roll', async (event) => {
-    // Create response guarantee to ensure user always gets a response
-    const responseGuarantee = createResponseGuarantee(socket, 'dice:roll:response', 10000);
-    
-    try {
-      await withAuth(socket, event, 'dice:roll:response', async (user, diceData) => {
-        // If we reach here, withAuth succeeded (it emits errors internally if it fails)
-        // So we don't need to mark response as sent here - continue with handler logic
-        if (!validateRequestFields(socket, diceData)) {
-          responseGuarantee.markAsSent(); // Response already sent by validateRequestFields
-          return;
-        }
-        const game_id = normalizeIdValue(diceData.game_id);
-        const user_id = normalizeIdValue(diceData.user_id || user.user_id);
+  const gameState = validateGameState(socket, match, user_id);
+  if (!gameState.isValid) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
-        const match = await fetchMatchOrEmitError(socket, game_id, redisClient, 'dice:roll:response');
-        
-        if (!match) {
-          responseGuarantee.markAsSent(); // Error already sent by fetchMatchOrEmitError
-          return;
-        }
+  const timeoutCheck = await checkTurnTimeout(socket, match, user_id, game_id);
+  if (timeoutCheck.hasTimeout) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
-        if (isGameCompleted(socket, match)) {
-          responseGuarantee.markAsSent(); // Error already sent by isGameCompleted
-          return;
-        }
+  const response = await handleDiceRollProcess(socket, diceData, user_id, match);
+  if (!response) {
+    responseGuarantee.markAsSent();
+    return;
+  }
 
-        const gameState = validateGameState(socket, match, user_id);
-        
-        if (!gameState.isValid) {
-          responseGuarantee.markAsSent(); // Error already sent by validateGameState
-          return;
-        }
+  response.dice_six_tracking = addDiceSixTracking(match, user_id, response.dice_number);
+  await scoreDiceRollAndUpdateResponse(response, match, user_id);
 
-        const timeoutCheck = await checkTurnTimeout(socket, match, user_id, game_id);
-        
-        if (timeoutCheck.hasTimeout) {
-          responseGuarantee.markAsSent(); // Error already sent by checkTurnTimeout
-          return;
-        }
+  if (!match.turnCount) {
+    match.turnCount = {};
+  }
+  if (!match.previousTurn || !sameId(match.previousTurn, user_id)) {
+    match.turnCount[user_id] = (match.turnCount[user_id] || 0) + 1;
+  }
+  match.previousTurn = user_id;
 
+  const pieceCheck = await checkPieceMovement(game_id, user_id, match, response.dice_number);
 
-        const response = await handleDiceRollProcess(socket, diceData, user_id, match);
-        
-        if (!response) {
-          // Error response already sent by handleDiceRollProcess
-          responseGuarantee.markAsSent();
-          return;
-        }
+  if (response.dice_number === 6) {
+    const needsLessThanSix = await checkIfAllPiecesNeedLessThanSix(game_id, user_id, match, response.dice_number);
+    if (needsLessThanSix.needsLess) {
+      const now = new Date().toISOString();
+      match.user1_time = now;
+      match.user2_time = now;
+      match.turn = user_id;
+      match.last_rolled_dice = null;
+      match.last_rolled_dice_user = null;
 
-
-        const diceSixTracking = addDiceSixTracking(match, user_id, response.dice_number);
-        response.dice_six_tracking = diceSixTracking;
-
-
-        await scoreDiceRollAndUpdateResponse(response, match, user_id);
-
-
-        if (!match.turnCount) {
-          match.turnCount = {};
-        }
-
-        if (!match.previousTurn || !sameId(match.previousTurn, user_id)) {
-          match.turnCount[user_id] = (match.turnCount[user_id] || 0) + 1;
-        }
-        match.previousTurn = user_id;
-
-
-        const pieceCheck = await checkPieceMovement(game_id, user_id, match, response.dice_number);
-
-
-        if (response.dice_number === 6) {
-          const needsLessThanSix = await checkIfAllPiecesNeedLessThanSix(game_id, user_id, match, response.dice_number);
-          if (needsLessThanSix.needsLess) {
-            const now = new Date().toISOString();
-            match.user1_time = now;
-            match.user2_time = now;
-            match.turn = user_id;
-            match.last_rolled_dice = null;
-            match.last_rolled_dice_user = null;
-            
-            response.can_move_pieces = false;
-            response.turn_passed = false;
-            response.gets_another_turn = true;
-            response.message = `You rolled 6 but all your pieces need less than 6 to reach home. You cannot move. Timer reset. Roll again!`;
-            response.needs_less_than_six = true;
-            response.min_distance_needed = needsLessThanSix.minDistance;
-            
-            try {
-              const partialUpdate = {
-                turn: match.turn,
-                user1_time: match.user1_time,
-                user2_time: match.user2_time,
-                last_rolled_dice: null,
-                last_rolled_dice_user: null,
-                updated_at: now
-              };
-              await saveMatchFields(redisClient, game_id, partialUpdate);
-            } catch (saveErr) {
-              await saveMatchState(redisClient, game_id, match);
-            }
-          } else {
-            // Normal 6 roll - ensure gets_another_turn is set
-            response.gets_another_turn = true;
-            response.turn_passed = false;
-            if (!response.message) {
-              response.message = 'You rolled a 6! You get another turn!';
-            }
-          }
-        } else {
-          // Not a 6 - explicitly set gets_another_turn to false
-          response.gets_another_turn = false;
-        }
-
-
-        await manageTurnLogic(match, user_id, response, pieceCheck);
-
-
-        try {
-          const partialUpdate = {};
-          if (typeof match.turn !== 'undefined') partialUpdate.turn = match.turn;
-          if (typeof match.user1_time !== 'undefined') partialUpdate.user1_time = match.user1_time;
-          if (typeof match.user2_time !== 'undefined') partialUpdate.user2_time = match.user2_time;
-          if (typeof match.user1_score !== 'undefined') partialUpdate.user1_score = match.user1_score;
-          if (typeof match.user2_score !== 'undefined') partialUpdate.user2_score = match.user2_score;
-          if (typeof match.scores !== 'undefined') partialUpdate.scores = match.scores;
-          if (typeof match.turnCount !== 'undefined') partialUpdate.turnCount = match.turnCount;
-          if (typeof match.previousTurn !== 'undefined') partialUpdate.previousTurn = match.previousTurn;
-          if (typeof match.first_six_rolled_user1 !== 'undefined') partialUpdate.first_six_rolled_user1 = match.first_six_rolled_user1;
-          if (typeof match.first_six_rolled_user2 !== 'undefined') partialUpdate.first_six_rolled_user2 = match.first_six_rolled_user2;
-          if (typeof match.consecutive_six_user1 !== 'undefined') partialUpdate.consecutive_six_user1 = match.consecutive_six_user1;
-          if (typeof match.consecutive_six_user2 !== 'undefined') partialUpdate.consecutive_six_user2 = match.consecutive_six_user2;
-          if (typeof match.guaranteed_six_turns_user1 !== 'undefined') partialUpdate.guaranteed_six_turns_user1 = match.guaranteed_six_turns_user1;
-          if (typeof match.guaranteed_six_turns_user2 !== 'undefined') partialUpdate.guaranteed_six_turns_user2 = match.guaranteed_six_turns_user2;
-          if (typeof match.in_guaranteed_six_mode_user1 !== 'undefined') partialUpdate.in_guaranteed_six_mode_user1 = match.in_guaranteed_six_mode_user1;
-          if (typeof match.in_guaranteed_six_mode_user2 !== 'undefined') partialUpdate.in_guaranteed_six_mode_user2 = match.in_guaranteed_six_mode_user2;
-          if (typeof match.guaranteed_six_turns_remaining_user1 !== 'undefined') partialUpdate.guaranteed_six_turns_remaining_user1 = match.guaranteed_six_turns_remaining_user1;
-          if (typeof match.guaranteed_six_turns_remaining_user2 !== 'undefined') partialUpdate.guaranteed_six_turns_remaining_user2 = match.guaranteed_six_turns_remaining_user2;
-          partialUpdate.updated_at = new Date().toISOString();
-          const merged = await saveMatchFields(redisClient, game_id, partialUpdate);
-          if (!merged) {
-            await saveMatchState(redisClient, game_id, match);
-          }
-        } catch (saveError) {
-          await saveMatchState(redisClient, game_id, match);
-        }
-
-
-        try {
-          // Pass responseGuarantee to notifyPlayers so it handles the emit
-          await notifyPlayers(socket, io, game_id, match, response, user_id, responseGuarantee);
-          // Response is sent by notifyPlayers using responseGuarantee.sendResponse()
-          // No need to mark as sent here - notifyPlayers handles it
-        } catch (notifyErr) {
-          // If notifyPlayers fails, ensure response is sent
-          logDiceHandlerError('notifyPlayers failed, sending response directly', notifyErr, { gameID: game_id });
-          if (!responseGuarantee.isResponseSent()) {
-            try {
-              response.turn = match.turn;
-              responseGuarantee.sendResponse(response);
-            } catch (emitErr) {
-              logDiceHandlerError('Failed to emit dice roll response', emitErr, { gameID: game_id });
-              // Response guarantee timeout will handle this
-            }
-          }
-        }
-      }).catch((authErr) => {
-        // withAuth emits errors internally, but we need to track it
-        // Check if withAuth already emitted (it uses emitError which emits to socket)
-        // If socket is still connected and no response sent, send via guarantee
-        if (!responseGuarantee.isResponseSent() && socket && socket.connected) {
-          // withAuth already emitted, but mark as sent to prevent duplicate
-          responseGuarantee.markAsSent();
-        }
-      });
-    } catch (err) {
-      logDiceHandlerError('registerDiceRollHandler top-level failure', err);
-      // Ensure error response is sent only if withAuth didn't already send one
-      if (!responseGuarantee.isResponseSent()) {
-        responseGuarantee.sendError({
-          code: 'handler_error',
-          type: 'system',
-          message: err.message || 'Failed to handle dice roll',
-          event: 'dice:roll:response'
-        });
+      response.can_move_pieces = false;
+      response.turn_passed = false;
+      response.gets_another_turn = true;
+      response.message = 'You rolled 6 but all your pieces need less than 6 to reach home. You cannot move. Timer reset. Roll again!';
+      response.needs_less_than_six = true;
+      response.min_distance_needed = needsLessThanSix.minDistance;
+    } else {
+      response.gets_another_turn = true;
+      response.turn_passed = false;
+      if (!response.message) {
+        response.message = 'You rolled a 6! You get another turn!';
       }
-    } finally {
-      responseGuarantee.cleanup();
     }
-  });
+  } else {
+    response.gets_another_turn = false;
+  }
+
+  await manageTurnLogic(match, user_id, response, pieceCheck);
+
+  try {
+    const partialUpdate = {};
+    if (typeof match.turn !== 'undefined') partialUpdate.turn = match.turn;
+    if (typeof match.user1_time !== 'undefined') partialUpdate.user1_time = match.user1_time;
+    if (typeof match.user2_time !== 'undefined') partialUpdate.user2_time = match.user2_time;
+    if (typeof match.user1_score !== 'undefined') partialUpdate.user1_score = match.user1_score;
+    if (typeof match.user2_score !== 'undefined') partialUpdate.user2_score = match.user2_score;
+    if (typeof match.scores !== 'undefined') partialUpdate.scores = match.scores;
+    if (typeof match.turnCount !== 'undefined') partialUpdate.turnCount = match.turnCount;
+    if (typeof match.previousTurn !== 'undefined') partialUpdate.previousTurn = match.previousTurn;
+    if (typeof match.first_six_rolled_user1 !== 'undefined') partialUpdate.first_six_rolled_user1 = match.first_six_rolled_user1;
+    if (typeof match.first_six_rolled_user2 !== 'undefined') partialUpdate.first_six_rolled_user2 = match.first_six_rolled_user2;
+    if (typeof match.consecutive_six_user1 !== 'undefined') partialUpdate.consecutive_six_user1 = match.consecutive_six_user1;
+    if (typeof match.consecutive_six_user2 !== 'undefined') partialUpdate.consecutive_six_user2 = match.consecutive_six_user2;
+    if (typeof match.guaranteed_six_turns_user1 !== 'undefined') partialUpdate.guaranteed_six_turns_user1 = match.guaranteed_six_turns_user1;
+    if (typeof match.guaranteed_six_turns_user2 !== 'undefined') partialUpdate.guaranteed_six_turns_user2 = match.guaranteed_six_turns_user2;
+    if (typeof match.in_guaranteed_six_mode_user1 !== 'undefined') partialUpdate.in_guaranteed_six_mode_user1 = match.in_guaranteed_six_mode_user1;
+    if (typeof match.in_guaranteed_six_mode_user2 !== 'undefined') partialUpdate.in_guaranteed_six_mode_user2 = match.in_guaranteed_six_mode_user2;
+    if (typeof match.guaranteed_six_turns_remaining_user1 !== 'undefined') partialUpdate.guaranteed_six_turns_remaining_user1 = match.guaranteed_six_turns_remaining_user1;
+    if (typeof match.guaranteed_six_turns_remaining_user2 !== 'undefined') partialUpdate.guaranteed_six_turns_remaining_user2 = match.guaranteed_six_turns_remaining_user2;
+    partialUpdate.updated_at = new Date().toISOString();
+    const merged = await saveMatchFields(redisClient, game_id, partialUpdate);
+    if (!merged) {
+      await saveMatchState(redisClient, game_id, match);
+    }
+  } catch (saveError) {
+    await saveMatchState(redisClient, game_id, match);
+  }
+
+  try {
+    await notifyPlayers(socket, io, game_id, match, response, user_id, responseGuarantee);
+  } catch (notifyErr) {
+    logDiceHandlerError('notifyPlayers failed, sending response directly', notifyErr, { gameID: game_id });
+    if (!responseGuarantee.isResponseSent()) {
+      try {
+        response.turn = match.turn;
+        responseGuarantee.sendResponse(response);
+      } catch (emitErr) {
+        logDiceHandlerError('Failed to emit dice roll response', emitErr, { gameID: game_id });
+      }
+    }
+  }
 }
 
 // ============================================================================
 // validateRequestFields
 // ============================================================================
 function validateRequestFields(socket, diceData) {
-  const requiredFields = ['game_id', 'contest_id', 'l_id','user_id'];
+  const requiredFields = ['game_id', 'contest_id', 'l_id', 'user_id'];
   if (!validateRequiredFields(socket, diceData, requiredFields, 'dice:roll:response')) {
     return false;
   }
@@ -1088,16 +982,6 @@ function validateRequestFields(socket, diceData) {
       type: 'validation',
       field: invalidField,
       message: `${invalidField} is required and must be a non-empty string.`
-    }, 'dice:roll:response');
-    return false;
-  }
-
-  if (diceData.user_id && !isNonEmptyString(diceData.user_id)) {
-    emitStandardError(socket, {
-      code: 'invalid_value',
-      type: 'validation',
-      field: 'user_id',
-      message: 'user_id must be a non-empty string when provided.'
     }, 'dice:roll:response');
     return false;
   }
@@ -1141,7 +1025,7 @@ async function scoreDiceRollAndUpdateResponse(response, match, user_id) {
   try {
     // Use consecutive six count from response (already calculated correctly in processDiceRoll)
     const consecutiveSixes = response.consecutive_sixes || 0;
-    
+
     const gameContext = {
       isFirstSix: !match.first_six_rolled_user1 && !match.first_six_rolled_user2,
       consecutiveSixes: consecutiveSixes,
@@ -1183,14 +1067,14 @@ async function scoreDiceRollAndUpdateResponse(response, match, user_id) {
 async function notifyPlayers(socket, io, game_id, match, response, user_id, responseGuarantee = null) {
   try {
     response.turn = match.turn;
-    
+
     // Ensure gets_another_turn is set based on turn
     if (response.dice_number === 6 && sameId(match.turn, user_id) && !response.gets_another_turn) {
       response.gets_another_turn = true;
     } else if (!sameId(match.turn, user_id) && response.gets_another_turn !== false) {
       response.gets_another_turn = false;
     }
-    
+
     // Use response guarantee if provided, otherwise direct emit
     if (responseGuarantee) {
       responseGuarantee.sendResponse(response);
@@ -1198,7 +1082,7 @@ async function notifyPlayers(socket, io, game_id, match, response, user_id, resp
       // Fallback to direct emit if no response guarantee
       socket.emit('dice:roll:response', response);
     }
-    
+
     // Then notify opponent (this can fail without affecting user response)
     try {
       const opponentSocketId = await findActiveOpponentSocketId(io, game_id, user_id, 'ludo');
@@ -1226,4 +1110,41 @@ async function notifyPlayers(socket, io, game_id, match, response, user_id, resp
   }
 }
 
+// ============================================================================
+// registerDiceRollHandler
+// ============================================================================
+async function registerDiceRollHandler(io, socket) {
+  socket.removeAllListeners('dice:roll');
+  socket.on('dice:roll', async (event) => {
+    // Create response guarantee to ensure user always gets a response
+    const responseGuarantee = createResponseGuarantee(socket, 'dice:roll:response', 10000);
+
+    try {
+      await withAuth(socket, event, 'dice:roll:response', async (user, diceData) => {
+        await processDiceRollFlow(io, socket, user, diceData, responseGuarantee);
+      }).catch((authErr) => {
+        // withAuth emits errors internally, but we need to track it
+        // Check if withAuth already emitted (it uses emitError which emits to socket)
+        // If socket is still connected and no response sent, send via guarantee
+        if (!responseGuarantee.isResponseSent() && socket && socket.connected) {
+          // withAuth already emitted, but mark as sent to prevent duplicate
+          responseGuarantee.markAsSent();
+        }
+      });
+    } catch (err) {
+      logDiceHandlerError('registerDiceRollHandler top-level failure', err);
+      // Ensure error response is sent only if withAuth didn't already send one
+      if (!responseGuarantee.isResponseSent()) {
+        responseGuarantee.sendError({
+          code: 'handler_error',
+          type: 'system',
+          message: err.message || 'Failed to handle dice roll',
+          event: 'dice:roll:response'
+        });
+      }
+    } finally {
+      responseGuarantee.cleanup();
+    }
+  });
+}
 module.exports = { registerDiceRollHandler };
