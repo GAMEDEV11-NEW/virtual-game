@@ -36,6 +36,35 @@ function formatTimestamp(value) {
   return `${HH}:${mm}:${ss} ${dd}-${MM}-${yyyy}`;
 }
 
+function isLikelyTimestampKey(key) {
+  const k = String(key || '').toLowerCase();
+  return k.endsWith('_at') || k.endsWith('_time') || k.includes('timestamp');
+}
+
+function formatTimestampsDeep(value, parentKey = '') {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatTimestampsDeep(item, parentKey));
+  }
+  if (value && typeof value === 'object') {
+    const out = {};
+    Object.entries(value).forEach(([k, v]) => {
+      out[k] = formatTimestampsDeep(v, k);
+    });
+    return out;
+  }
+  if (typeof value === 'string' || value instanceof Date) {
+    if (isLikelyTimestampKey(parentKey)) {
+      return formatTimestamp(value);
+    }
+    const text = String(value);
+    // ISO-like fallback for values inside arrays/unknown keys
+    if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+      return formatTimestamp(text);
+    }
+  }
+  return value;
+}
+
 function qs(obj) {
   const params = new URLSearchParams();
   Object.entries(obj).forEach(([k, v]) => {
@@ -151,9 +180,6 @@ function renderPageInfo() {
 
 async function loadDashboard() {
   const data = await fetchJson('/api/overview');
-  const serviceEl = document.getElementById('service');
-  if (serviceEl) serviceEl.textContent = JSON.stringify(data.service || {}, null, 2);
-
   const live = data.live || {};
   const counts = live.redis_counts || {};
   const cards = [
@@ -205,11 +231,11 @@ async function loadLive() {
         <td>${esc(row.league_id || '')}</td>
         <td>${esc(row.status || '')}</td>
         <td class="mono">${esc(row.match_id || '')}</td>
-        <td>${esc(row.joined_at || '')}</td>
+        <td>${esc(formatTimestamp(row.joined_at || ''))}</td>
         <td><button type="button" data-action="toggle-contest-detail" data-key="${safeRowKey}">${expanded ? 'Hide' : 'View'}</button></td>
       </tr>
       <tr class="live-contest-detail-row" style="${expanded ? '' : 'display:none'}">
-        <td colspan="9" class="mono">${esc(JSON.stringify(row.details || {}, null, 2))}</td>
+        <td colspan="9" class="mono">${esc(JSON.stringify(formatTimestampsDeep(row.details || {}), null, 2))}</td>
       </tr>`;
     }
     const rowKey = String(row.key || `match:${row.game_id || ''}`);
@@ -221,11 +247,11 @@ async function loadLive() {
       <td>${esc(row.user1_id || '')}</td>
       <td>${esc(row.user2_id || '')}</td>
       <td>${esc(row.turn || '')}</td>
-      <td>${esc(row.updated_at || '')}</td>
+      <td>${esc(formatTimestamp(row.updated_at || ''))}</td>
       <td><button type="button" data-action="toggle-contest-detail" data-key="${safeRowKey}">${expanded ? 'Hide' : 'View'}</button></td>
     </tr>
     <tr class="live-contest-detail-row" style="${expanded ? '' : 'display:none'}">
-      <td colspan="7" class="mono">${esc(JSON.stringify(row.details || {}, null, 2))}</td>
+      <td colspan="7" class="mono">${esc(JSON.stringify(formatTimestampsDeep(row.details || {}), null, 2))}</td>
     </tr>`;
   }).join('');
 }
@@ -274,7 +300,10 @@ async function loadHistory() {
       <td>${formatTimestamp(row.joined_at)}</td>
       <td>${formatTimestamp(row.started_at)}</td>
       <td>${formatTimestamp(row.ended_at)}</td>
-      <td><button type="button" data-action="preview-history" data-index="${index}">View</button></td>
+      <td>
+        <button type="button" data-action="preview-history" data-index="${index}">View</button>
+        <button type="button" data-action="delete-history" data-index="${index}">Delete</button>
+      </td>
     </tr>
     <tr class="history-matchkey-row" style="${expanded && hasMatchId ? '' : 'display:none'}">
       <td colspan="17" class="cell-match-key mono">${matchId}</td>
@@ -286,7 +315,9 @@ async function loadHistory() {
 function renderHistoryPreview(value) {
   const preview = document.getElementById('historyPreview');
   if (!preview) return;
-  preview.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  preview.textContent = typeof value === 'string'
+    ? value
+    : JSON.stringify(formatTimestampsDeep(value), null, 2);
 }
 
 async function loadHistoryS3Preview(row) {
@@ -477,6 +508,46 @@ async function initHistoryPage() {
 
       if (action === 'preview-history') {
         loadHistoryS3Preview(row).catch(() => {});
+        return;
+      }
+
+      if (action === 'delete-history') {
+        const lid = String(row.l_id || '').trim();
+        if (!lid) {
+          renderHistoryPreview('Delete failed: missing l_id.');
+          return;
+        }
+        const ok = window.confirm(`Delete row with l_id "${lid}"?`);
+        if (!ok) return;
+        fetch(`/api/historic/delete/${encodeURIComponent(lid)}`, {
+          method: 'POST',
+          credentials: 'include'
+        })
+          .then(async (res) => {
+            const data = await res.json();
+            if (res.status !== 200 || data.status !== 'ok') {
+              renderHistoryPreview({
+                status: 'error',
+                message: data.message || 'failed_to_delete_row',
+                l_id: lid
+              });
+              return;
+            }
+            renderHistoryPreview({
+              status: 'ok',
+              message: 'Row deleted',
+              l_id: lid
+            });
+            state.expandedMatchKeyRows = {};
+            await loadHistory();
+          })
+          .catch((error) => {
+            renderHistoryPreview({
+              status: 'error',
+              message: error?.message || 'failed_to_delete_row',
+              l_id: lid
+            });
+          });
       }
     });
   }

@@ -653,6 +653,52 @@ async function startAdminWeb() {
     }
   });
 
+  async function deleteHistoricByLid(lIdRaw) {
+    const lId = String(lIdRaw || '').trim();
+    if (!lId) {
+      return { code: 400, body: { status: 'error', message: 'l_id_required' } };
+    }
+    const [result] = await mysqlClient.query(
+      `UPDATE ludo_game
+       SET is_deleted = 1, updated_at = NOW(3)
+       WHERE l_id = ? AND is_deleted = 0`,
+      [lId]
+    );
+    const affected = Number(result?.affectedRows || 0);
+    if (affected <= 0) {
+      return { code: 404, body: { status: 'error', message: 'row_not_found_or_already_deleted' } };
+    }
+    return { code: 200, body: { status: 'ok', l_id: lId, deleted: affected } };
+  }
+
+  adminServer.delete('/api/historic/:lid', async (request, reply) => {
+    try {
+      const result = await deleteHistoricByLid(request.params?.lid);
+      reply.code(result.code);
+      return result.body;
+    } catch (err) {
+      reply.code(500);
+      return {
+        status: 'error',
+        message: err?.message || 'failed_to_delete_historic_row'
+      };
+    }
+  });
+
+  adminServer.post('/api/historic/delete/:lid', async (request, reply) => {
+    try {
+      const result = await deleteHistoricByLid(request.params?.lid);
+      reply.code(result.code);
+      return result.body;
+    } catch (err) {
+      reply.code(500);
+      return {
+        status: 'error',
+        message: err?.message || 'failed_to_delete_historic_row'
+      };
+    }
+  });
+
   adminServer.get('/api/historic/:matchId/state', async (request, reply) => {
     try {
       const matchId = String(request.params?.matchId || '').trim();

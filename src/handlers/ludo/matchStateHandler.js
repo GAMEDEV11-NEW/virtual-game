@@ -1,6 +1,7 @@
 const withAuth = require('../../middleware/withAuth');
 const { redis: redisClient } = require('../../utils/redis');
 const { fetchMatchOrEmitError, validateRequiredFields, emitStandardError } = require('../../utils/gameUtils');
+const { GAME_CONFIG } = require('../../config/gameConfig');
 
 const EVENTS = {
   REQUEST: 'get:match_state',
@@ -19,7 +20,31 @@ function sameId(a, b) {
   return na === nb;
 }
 
+function toDateSafe(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function remainingSecondsFrom(lastTimeIso, timeoutSeconds) {
+  const lastTime = toDateSafe(lastTimeIso);
+  if (!lastTime) return timeoutSeconds;
+  const elapsed = Math.floor((Date.now() - lastTime.getTime()) / 1000);
+  return Math.max(0, timeoutSeconds - elapsed);
+}
+
+function buildTimeLeftData(match) {
+  const timeoutSeconds = Number(GAME_CONFIG?.TIMING?.ALLOWED_TURN_DELAY_SECONDS || 15);
+  const user1Left = remainingSecondsFrom(match?.user1_time, timeoutSeconds);
+  const user2Left = remainingSecondsFrom(match?.user2_time, timeoutSeconds);
+  return {
+    user1_time_left_seconds: user1Left,
+    user2_time_left_seconds: user2Left
+  };
+}
+
 function buildMatchStateResponse(match, userId) {
+  const timeLeft = buildTimeLeftData(match);
   return {
     status: 'success',
     game_id: normalizeId(match?.game_id || ''),
@@ -37,8 +62,12 @@ function buildMatchStateResponse(match, userId) {
       user2_pieces: Array.isArray(match?.user2_pieces) ? match.user2_pieces : [],
       user1_score: match?.user1_score ?? 0,
       user2_score: match?.user2_score ?? 0,
+      user1_chance: match?.user1_chance ?? 0,
+      user2_chance: match?.user2_chance ?? 0,
       user1_time: match?.user1_time || null,
       user2_time: match?.user2_time || null,
+      user1_time_left_seconds: timeLeft.user1_time_left_seconds,
+      user2_time_left_seconds: timeLeft.user2_time_left_seconds,
       start_time: match?.start_time || null,
       updated_at: match?.updated_at || null
     },

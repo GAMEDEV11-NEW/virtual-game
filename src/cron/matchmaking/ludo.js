@@ -242,6 +242,20 @@ class LudoMatchmakingService {
             } catch (_) {
             }
         }
+
+        // Strong cleanup: remove by user + l_id across any contest segment.
+        if (lid) {
+            try {
+                const lidPatternKeys = await redisService.scan(`contest_join:${userId}:*:${lid}`, { count: 200 });
+                for (const key of lidPatternKeys) {
+                    try {
+                        await redisService.del(key);
+                    } catch (_) {
+                    }
+                }
+            } catch (_) {
+            }
+        }
     }
 
     // ============================================================================
@@ -307,7 +321,13 @@ class LudoMatchmakingService {
         const cutoff = new Date(Date.now() - MATCHMAKING_CUTOFF_MS);
         const pendingUsersRaw = await this._loadPendingUsers(leagueIdsArray);
         const pendingUsers = Array.isArray(pendingUsersRaw)
-            ? pendingUsersRaw.slice(0, Math.max(1, MAX_MATCHMAKING_USERS_PER_TICK))
+            ? pendingUsersRaw
+                .sort((a, b) => {
+                    const at = a?.joinedAt ? new Date(a.joinedAt).getTime() : 0;
+                    const bt = b?.joinedAt ? new Date(b.joinedAt).getTime() : 0;
+                    return at - bt;
+                })
+                .slice(0, Math.max(1, MAX_MATCHMAKING_USERS_PER_TICK))
             : [];
         const expiryWarningStart = new Date(Date.now() - EXPIRY_WARNING_START_OFFSET_MS);
         const expiryWarningEnd = new Date(Date.now() - EXPIRY_WARNING_END_OFFSET_MS);

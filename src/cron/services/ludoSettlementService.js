@@ -57,6 +57,18 @@ class LudoSettlementService {
             } catch (_) {
             }
           }
+          if (userId && lId) {
+            try {
+              const keys = await redis.scan(`contest_join:${userId}:*:${lId}`, { count: 200 });
+              for (const key of keys) {
+                try {
+                  await redis.del(key);
+                } catch (_) {
+                }
+              }
+            } catch (_) {
+            }
+          }
         }
       }
 

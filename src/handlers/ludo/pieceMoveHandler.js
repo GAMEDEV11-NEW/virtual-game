@@ -18,12 +18,24 @@ function logHandlerError(context, error, metadata = {}) {
   return;
 }
 
+function normalizeIdValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeIdValue(a);
+  const nb = normalizeIdValue(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
+
 // ============================================================================
 // PlayerContext
 // ============================================================================
 class PlayerContext {
   constructor(match, userID) {
-    this.isUser1 = userID === match.user1_id;
+    this.isUser1 = sameId(userID, match.user1_id);
     this.userID = userID;
     this.opponentID = this.isUser1 ? match.user2_id : match.user1_id;
     this.timeKey = this.isUser1 ? 'user1_time' : 'user2_time';
@@ -158,7 +170,7 @@ async function fetchAndValidateMatch(socket, gameID) {
 // validateUserTurn
 // ============================================================================
 function validateUserTurn(socket, match, userID) {
-  if (match.turn !== userID) {
+  if (!sameId(match.turn, userID)) {
     emitStandardError(socket, {
       code: ERROR_CODES.TURN_EXPIRED,
       type: ERROR_TYPES.GAME,
@@ -409,7 +421,7 @@ function registerPieceMoveHandler(io, socket) {
         };
       }
 
-      if (!match.previousTurn || match.previousTurn !== user.user_id) {
+      if (!match.previousTurn || !sameId(match.previousTurn, user.user_id)) {
         match.turnCount[user.user_id] += 1;
       }
       match.previousTurn = user.user_id;
@@ -454,8 +466,8 @@ function registerPieceMoveHandler(io, socket) {
       const isHomeReach = isExactHomeReach(fromPos, toPos);
       
 
-      const playerPieces = (user.user_id === match.user1_id) ? (match.user1_pieces || []) : (match.user2_pieces || []);
-      const opponentPieces = (user.user_id === match.user1_id) ? (match.user2_pieces || []) : (match.user1_pieces || []);
+      const playerPieces = (sameId(user.user_id, match.user1_id)) ? (match.user1_pieces || []) : (match.user2_pieces || []);
+      const opponentPieces = (sameId(user.user_id, match.user1_id)) ? (match.user2_pieces || []) : (match.user1_pieces || []);
       evaluateMoveAgainstBoard({
         fromPos,
         toPos,
@@ -485,7 +497,7 @@ function registerPieceMoveHandler(io, socket) {
       const freshMatchAfterMove = await reloadMatchFromRedis(validatedMoveData.game_id);
       const workingMatch = freshMatchAfterMove || match;
       try {
-        const isMoverUser1 = user.user_id === workingMatch.user1_id;
+        const isMoverUser1 = sameId(user.user_id, workingMatch.user1_id);
         const arrKey = isMoverUser1 ? 'user1_pieces' : 'user2_pieces';
         const arr = Array.isArray(workingMatch[arrKey]) ? workingMatch[arrKey] : [];
         const idx = arr.findIndex(p => (p.piece_id ?? p.id) === validatedMoveData.piece_id);
@@ -506,8 +518,8 @@ function registerPieceMoveHandler(io, socket) {
         });
       }
 
-      const playerPiecesCurrent = (user.user_id === (workingMatch.user1_id)) ? (workingMatch.user1_pieces || []) : (workingMatch.user2_pieces || []);
-      const opponentPiecesCurrent = (user.user_id === (workingMatch.user1_id)) ? (workingMatch.user2_pieces || []) : (workingMatch.user1_pieces || []);
+      const playerPiecesCurrent = (sameId(user.user_id, workingMatch.user1_id)) ? (workingMatch.user1_pieces || []) : (workingMatch.user2_pieces || []);
+      const opponentPiecesCurrent = (sameId(user.user_id, workingMatch.user1_id)) ? (workingMatch.user2_pieces || []) : (workingMatch.user1_pieces || []);
       
       const mappingKill = evaluateKillByMapping(
         toPos,
@@ -523,7 +535,7 @@ function registerPieceMoveHandler(io, socket) {
     
         moveResponse.captured_piece = mappingKill.killedOpponentPieceIds.join(',');
         moveResponse.kill_position = mappingKill.killedOpponentSquare || toPos;
-        const killedUserId = (user.user_id === match.user1_id) ? match.user2_id : match.user1_id;
+        const killedUserId = (sameId(user.user_id, match.user1_id)) ? match.user2_id : match.user1_id;
         
         const killedPieceIdsMapping = {};
         
@@ -579,9 +591,9 @@ function registerPieceMoveHandler(io, socket) {
         );
         
         if (scoreResult.points > 0) {
-          if (workingMatch.user1_id === user.user_id) {
+          if (sameId(workingMatch.user1_id, user.user_id)) {
             workingMatch.user1_score = (parseInt(workingMatch.user1_score) || 0) + scoreResult.points;
-          } else if (workingMatch.user2_id === user.user_id) {
+          } else if (sameId(workingMatch.user2_id, user.user_id)) {
             workingMatch.user2_score = (parseInt(workingMatch.user2_score) || 0) + scoreResult.points;
           }
           
@@ -613,12 +625,12 @@ function registerPieceMoveHandler(io, socket) {
         
         if (hasWon) {
           gameWon = true;
-          const opponentUserId = (user.user_id === workingMatch.user1_id) ? workingMatch.user2_id : workingMatch.user1_id;
+          const opponentUserId = (sameId(user.user_id, workingMatch.user1_id)) ? workingMatch.user2_id : workingMatch.user1_id;
           
-          const winnerScore = (user.user_id === workingMatch.user1_id) ? 
+          const winnerScore = (sameId(user.user_id, workingMatch.user1_id)) ? 
             (parseInt(workingMatch.user1_score) || 0) : 
             (parseInt(workingMatch.user2_score) || 0);
-          const loserScore = (user.user_id === workingMatch.user1_id) ? 
+          const loserScore = (sameId(user.user_id, workingMatch.user1_id)) ? 
             (parseInt(workingMatch.user2_score) || 0) : 
             (parseInt(workingMatch.user1_score) || 0);
           
@@ -877,7 +889,7 @@ function registerPieceMoveHandler(io, socket) {
             });
           }
           
-          const opponentUserId = (user.user_id === finalMatch.user1_id) ? finalMatch.user2_id : finalMatch.user1_id;
+          const opponentUserId = (sameId(user.user_id, finalMatch.user1_id)) ? finalMatch.user2_id : finalMatch.user1_id;
           
         let opponentSocketId = null;
         try {

@@ -89,6 +89,8 @@ const REDIS_KEYS = {
   WATERSORT_USER_CHANCE: (gameId) => `watersort_userchance:${gameId}`,
   SOCKET_TO_USER: (socketId) => `socket_to_user:${socketId}`,
   USER_TO_SOCKET: (userId) => `user_to_socket:${userId}`,
+  LID_TO_SOCKET: (lId) => `lid_to_socket:${lId}`,
+  SOCKET_TO_LID: (socketId) => `socket_to_lid:${socketId}`,
   WATERSORT_LEVELS_CACHE: 'watersort:levels:cache',
   WATERSORT_LEVEL_CACHE: (levelNo) => `watersort:level:${levelNo}`
 };

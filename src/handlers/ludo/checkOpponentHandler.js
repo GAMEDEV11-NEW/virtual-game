@@ -59,6 +59,74 @@ function sameNormalizedId(a, b) {
   return normalizeId(a) !== '' && normalizeId(a) === normalizeId(b);
 }
 
+function normalizeDiceValue(value) {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    const first = value[0];
+    if (first && typeof first === 'object' && first.dice_id) return String(first.dice_id);
+    return normalizeDiceValue(first);
+  }
+  if (typeof value === 'object') {
+    if (value.dice_id) return String(value.dice_id);
+    if (value.id) return String(value.id);
+    return null;
+  }
+  const normalized = normalizeId(value);
+  return normalized || null;
+}
+
+function normalizePieceForResponse(piece, gameId, userId, index) {
+  const item = piece && typeof piece === 'object' ? piece : {};
+  const resolvedPieceId = normalizeId(item.piece_id || item.id);
+  const pieceNoRaw = item.piece_no != null ? Number(item.piece_no) : (index + 1);
+  const pieceNo = Number.isFinite(pieceNoRaw) && pieceNoRaw > 0 ? pieceNoRaw : (index + 1);
+  const nowIso = new Date().toISOString();
+  return {
+    game_id: normalizeId(item.game_id) || normalizeId(gameId),
+    user_id: Number.isFinite(Number(item.user_id)) ? Number(item.user_id) : Number(userId),
+    move_number: Number.isFinite(Number(item.move_number)) ? Number(item.move_number) : 0,
+    piece_id: resolvedPieceId || `piece_${pieceNo}`,
+    player_id: normalizeId(item.player_id),
+    from_pos_last: normalizeId(item.from_pos_last) || 'initial',
+    to_pos_last: normalizeId(item.to_pos_last) || 'initial',
+    piece_type: normalizeId(item.piece_type) || `piece_${pieceNo}`,
+    captured_piece: normalizeId(item.captured_piece),
+    created_at: normalizeId(item.created_at) || nowIso,
+    updated_at: normalizeId(item.updated_at) || nowIso,
+    enhanced: true
+  };
+}
+
+function normalizePiecesForResponse(pieces, gameId, userId) {
+  const arr = Array.isArray(pieces) ? pieces : [];
+  const normalized = arr.map((piece, index) => normalizePieceForResponse(piece, gameId, userId, index));
+  return normalized.slice(0, 4);
+}
+
+function hasFourRealPieces(pieces) {
+  if (!Array.isArray(pieces) || pieces.length < 4) return false;
+  const firstFour = pieces.slice(0, 4);
+  return firstFour.every((piece) => {
+    const id = normalizeId(piece?.piece_id || piece?.id);
+    return !!id;
+  });
+}
+
+function isLudoStateReadyForSuccess(entry, gameData, gameType = 'ludo') {
+  const gameTypeLower = String(gameType || '').toLowerCase();
+  if (gameTypeLower !== 'ludo') return true;
+
+  const userReady = hasFourRealPieces(gameData?.userPieces);
+  const opponentReady = hasFourRealPieces(gameData?.opponentPieces);
+  const userDiceReady = !!normalizeDiceValue(gameData?.userDiceID);
+  const opponentDiceReady = !!normalizeDiceValue(gameData?.opponentDiceID);
+  const hasMatch = !!normalizeId(entry?.MatchPairID);
+  const hasOpponent = hasValidOpponent(entry);
+
+  return hasMatch && hasOpponent && userReady && opponentReady && userDiceReady && opponentDiceReady;
+}
+
 async function getContestJoinSnapshotFromRedis(userId, contestId, lId) {
   const normalizedUserId = normalizeId(userId);
   const normalizedContestId = normalizeId(contestId);
@@ -262,6 +330,7 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
   let lastDiceRoll = null;
   let lastDiceUser = null;
   let lastDiceTime = null;
+  let matchTurnId = null;
 
   if (needsPieces) {
     try {
@@ -280,6 +349,10 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
             opponentPieces = Array.isArray(match.user1_pieces) ? match.user1_pieces : [];
             userDiceID = match.user2_dice || null;
             opponentDiceID = match.user1_dice || null;
+          }
+
+          if (match.turn !== undefined && match.turn !== null) {
+            matchTurnId = match.turn;
           }
 
           if (isSnakes) {
@@ -328,7 +401,8 @@ async function fetchGamePiecesAndDice(gameID, userID, opponentUserID, gameType =
     opponentProfile,
     lastDiceRoll,
     lastDiceUser,
-    lastDiceTime
+    lastDiceTime,
+    matchTurnId
   };
 }
 
@@ -374,19 +448,23 @@ async function ensureDiceLookup(gameID, userID, diceId) {
 // ============================================================================
 function emitOpponentResponseWithGameData(socket, entry, gameData, gameType = 'ludo') {
   const gameTypeLower = (gameType || '').toLowerCase();
+  const resolvedTurnId = normalizeId(entry.TurnID) || normalizeId(gameData.matchTurnId) || null;
+  const gameId = normalizeId(entry.MatchPairID);
+  const userId = normalizeId(entry.UserID);
+  const opponentUserId = normalizeId(entry.OpponentUserID);
   const response = {
     status: 'success',
-    user_id: entry.UserID ? String(entry.UserID) : '',
-    opponent_user_id: entry.OpponentUserID ? String(entry.OpponentUserID) : '',
+    user_id: userId,
+    opponent_user_id: opponentUserId,
     opponent_league_id: entry.OpponentLeagueID ? String(entry.OpponentLeagueID) : '',
     joined_at: toIsoDate(entry.JoinedAt),
-    game_id: normalizeId(entry.MatchPairID),
-    user_pieces: Array.isArray(gameData.userPieces) ? gameData.userPieces : [],
-    opponent_pieces: Array.isArray(gameData.opponentPieces) ? gameData.opponentPieces : [],
-    user_dice: gameData.userDiceID ?? null,
-    opponent_dice: gameData.opponentDiceID ?? null,
+    game_id: gameId,
+    user_pieces: normalizePiecesForResponse(gameData.userPieces, gameId, userId),
+    opponent_pieces: normalizePiecesForResponse(gameData.opponentPieces, gameId, opponentUserId),
+    user_dice: normalizeDiceValue(gameData.userDiceID),
+    opponent_dice: normalizeDiceValue(gameData.opponentDiceID),
     pieces_status: 'active',
-    turn_id: entry.TurnID ?? null,
+    turn_id: resolvedTurnId,
     start_time: toIsoDate(entry.JoinedAt),
     user_full_name: gameData.userProfile?.full_name ?? '',
     user_profile_data: gameData.userProfile?.profile_data ?? '',
@@ -490,6 +568,20 @@ async function cleanupExpiredContestJoinCache(userId, contestId, lId) {
       }
     }
   } catch (_) {
+  }
+
+  // Strong cleanup: remove by user+l_id across any contest segment.
+  if (normalizedLid) {
+    try {
+      const lidPatternKeys = await redisClient.scan(`contest_join:${normalizedUserId}:*:${normalizedLid}`, { count: 200 });
+      for (const key of lidPatternKeys) {
+        try {
+          await redisClient.del(key);
+        } catch (_) {
+        }
+      }
+    } catch (_) {
+    }
   }
 }
 
@@ -776,6 +868,10 @@ async function handleCheckOpponent(socket, data) {
   }
 
   const gameData = await fetchGamePiecesAndDice(matchPairID, entry.UserID, entry.OpponentUserID, gameType);
+  if (!isLudoStateReadyForSuccess(entry, gameData, gameType)) {
+    emitPendingOpponentResponse(socket, entry, 'Matched found, preparing game...');
+    return;
+  }
 
   // if (WATER_SORT_GAME_TYPES.has(gameType)) {
   //   console.error('[check:opponent] watersort_payload_emit', { user_id: entry.UserID, matchPairID });

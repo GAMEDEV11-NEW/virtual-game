@@ -26,6 +26,18 @@ const { redis: redisClient } = require('../../utils/redis');
 const { safeParseRedisData } = require('../../utils/gameUtils');
 const { REDIS_KEYS, GAME_TYPES } = require('../../constants');
 
+function normalizeId(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeId(a);
+  const nb = normalizeId(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
+
 // ============================================================================
 // Finds the opponent's active socket ID with validation
 // ============================================================================
@@ -51,9 +63,9 @@ async function findActiveOpponentSocketId(io, gameID, userID, gameType) {
     if (!match) return null;
 
     let opponentUserID = null;
-    if (match.user1_id === userID) {
+    if (sameId(match.user1_id, userID)) {
       opponentUserID = match.user2_id;
-    } else if (match.user2_id === userID) {
+    } else if (sameId(match.user2_id, userID)) {
       opponentUserID = match.user1_id;
     }
 
@@ -75,7 +87,7 @@ async function findActiveOpponentSocketId(io, gameID, userID, gameType) {
 
     const opponentSocket = allSockets.find(socket => {
       const hasUser = socket.user && socket.user.user_id;
-      const isOpponent = hasUser && socket.user.user_id === opponentUserID;
+      const isOpponent = hasUser && sameId(socket.user.user_id, opponentUserID);
       const isConnected = socket.connected;
 
       return isOpponent && isConnected;
@@ -89,7 +101,7 @@ async function findActiveOpponentSocketId(io, gameID, userID, gameType) {
       const keys = await redisClient.keys(`${REDIS_KEYS.SOCKET_TO_USER('*')}`);
       for (const key of keys) {
         const mappedUserId = await redisClient.get(key);
-        if (mappedUserId === opponentUserID) {
+        if (sameId(mappedUserId, opponentUserID)) {
           const socketId = key.replace('socket_to_user:', '');
           const socket = io.sockets.sockets.get(socketId);
           if (socket && socket.connected) {
@@ -101,11 +113,11 @@ async function findActiveOpponentSocketId(io, gameID, userID, gameType) {
     }
 
     try {
-      const gameRoom = `snakesladders_game_${gameID}`;
+      const gameRoom = `game_${gameID}`;
       const roomSockets = await io.in(gameRoom).fetchSockets();
 
       for (const socket of roomSockets) {
-        if (socket.user && socket.user.user_id === opponentUserID) {
+        if (socket.user && sameId(socket.user.user_id, opponentUserID)) {
           return socket.id;
         }
       }

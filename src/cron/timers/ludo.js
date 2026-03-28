@@ -26,6 +26,33 @@ let lastHeartbeatLogAt = 0;
 const HEARTBEAT_LOG_INTERVAL_MS = 30000;
 const LUDO_TIMER_MATCH_SCAN_COUNT = Number(process.env.LUDO_TIMER_MATCH_SCAN_COUNT || 10000);
 
+async function scanKeysByPattern(redisClient, pattern, count = 100) {
+  const scanCount = Math.max(1, Number(count) || 100);
+  const scanNode = async (node) => {
+    const keys = [];
+    let cursor = '0';
+    do {
+      const [nextCursor, batch] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', scanCount);
+      cursor = nextCursor;
+      if (Array.isArray(batch) && batch.length > 0) {
+        keys.push(...batch);
+      }
+    } while (cursor !== '0');
+    return keys;
+  };
+
+  try {
+    if (redisClient && typeof redisClient.nodes === 'function') {
+      const masters = redisClient.nodes('master');
+      const all = await Promise.all(masters.map((node) => scanNode(node)));
+      return [...new Set(all.flat())];
+    }
+    return await scanNode(redisClient);
+  } catch (_) {
+    return [];
+  }
+}
+
 // ============================================================================
 // Initialization Functions
 // ============================================================================
@@ -91,7 +118,7 @@ async function processLudoUserTimers() {
 
   const scanCount = Math.max(1, LUDO_TIMER_MATCH_SCAN_COUNT);
   const serverId = String(config.serverId || '1');
-  const matchKeys = await redis.scan(`match_server:*:${serverId}`, { count: scanCount });
+  const matchKeys = await scanKeysByPattern(redis, `match_server:*:${serverId}`, scanCount);
   const activeGames = Array.isArray(matchKeys)
     ? matchKeys
       .map((key) => String(key || ''))
@@ -740,7 +767,7 @@ async function completeLudoGame(gameId, matchData, redisInstance) {
 
   await redis.del(matchKey);
   try {
-    const matchServerKeys = await redis.scan(`match_server:${String(gameId)}:*`, { count: 100 });
+    const matchServerKeys = await scanKeysByPattern(redis, `match_server:${String(gameId)}:*`, 100);
     if (Array.isArray(matchServerKeys) && matchServerKeys.length > 0) {
       for (const key of matchServerKeys) {
         try {

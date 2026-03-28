@@ -269,10 +269,12 @@ async function socketAuthMiddleware(socket, next) {
       return next(new Error('Authentication error: Failed to update user session'));
     }
     
+    await enforceSingleLidSocket(socket, required.l_id, socketId);
     await cleanupExistingSocketMappings(required.user_id, socketId);
     
     await storeSocketToUserMapping(socketId, required.user_id);
     await storeUserToSocketMapping(required.user_id, socketId);
+    await storeLidSocketMappings(required.l_id, socketId);
     const contestJoinSnapshot = await storeContestJoinSnapshot(required.user_id, required.contest_id, contestJoinData, required.l_id);
 
     // Non-blocking background persistence to ludo_game as pending.
@@ -282,6 +284,8 @@ async function socketAuthMiddleware(socket, next) {
     
     socket.user = {
       user_id: required.user_id,
+      contest_id: required.contest_id,
+      l_id: required.l_id,
       session_token: existingSession?.session_token || '',
       contest_join_data: contestJoinSnapshot
     };
@@ -299,23 +303,41 @@ async function socketAuthMiddleware(socket, next) {
 // ============================================================================
 async function cleanupExistingSocketMappings(userId, newSocketId) {
   try {
-    const keys = await redis.keys(`${REDIS_KEYS.SOCKET_TO_USER('*')}`);
-    const userSocketMappings = [];
-    
-    for (const key of keys) {
-      const mappedUserId = await redis.get(key);
-      if (normalizeString(mappedUserId) === normalizeString(userId)) {
-        const socketId = key.replace('socket_to_user:', '');
-        if (socketId !== newSocketId) {
-          userSocketMappings.push(socketId);
-        }
-      }
-    }
-    
-    for (const oldSocketId of userSocketMappings) {
+    const userKey = REDIS_KEYS.USER_TO_SOCKET(userId);
+    const oldSocketId = normalizeString(await redis.get(userKey));
+    const normalizedNewSocketId = normalizeString(newSocketId);
+    if (oldSocketId && oldSocketId !== normalizedNewSocketId) {
       await redis.del(REDIS_KEYS.SOCKET_TO_USER(oldSocketId));
+      await redis.del(REDIS_KEYS.SOCKET_TO_LID(oldSocketId));
     }
   } catch (error) {
+  }
+}
+
+async function enforceSingleLidSocket(socket, lId, currentSocketId) {
+  const normalizedLid = normalizeString(lId);
+  const normalizedSocketId = normalizeString(currentSocketId);
+  if (!normalizedLid || !normalizedSocketId) return;
+
+  const lidKey = REDIS_KEYS.LID_TO_SOCKET(normalizedLid);
+  const existingSocketId = normalizeString(await redis.get(lidKey));
+  if (!existingSocketId || existingSocketId === normalizedSocketId) return;
+
+  try {
+    const existingSocket = socket.server.sockets.sockets.get(existingSocketId);
+    if (existingSocket) {
+      existingSocket.disconnect(true);
+    }
+  } catch (_) {
+  }
+
+  try {
+    await redis.del(REDIS_KEYS.SOCKET_TO_USER(existingSocketId));
+  } catch (_) {
+  }
+  try {
+    await redis.del(REDIS_KEYS.SOCKET_TO_LID(existingSocketId));
+  } catch (_) {
   }
 }
 
@@ -347,6 +369,14 @@ async function storeUserToSocketMapping(userId, socketId) {
   } catch (error) {
     throw error;
   }
+}
+
+async function storeLidSocketMappings(lId, socketId) {
+  const normalizedLid = normalizeString(lId);
+  const normalizedSocketId = normalizeString(socketId);
+  if (!normalizedLid || !normalizedSocketId) return;
+  await redis.set(REDIS_KEYS.LID_TO_SOCKET(normalizedLid), normalizedSocketId);
+  await redis.set(REDIS_KEYS.SOCKET_TO_LID(normalizedSocketId), normalizedLid);
 }
 
 module.exports = socketAuthMiddleware;

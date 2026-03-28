@@ -18,6 +18,8 @@ let ludoMatchmakingTimerId = null;
 let ludoUserTimerStarted = false;
 let ludoSettlementService = null;
 let ludoSettlementTimerId = null;
+let ludoContestJoinCleanupService = null;
+let ludoContestJoinCleanupTimerId = null;
 
 let snakesMatchmakingService = null;
 let snakesMatchmakingTimerId = null;
@@ -92,6 +94,21 @@ function startLudoSettlement(session) {
   console.log(`[Cron] Ludo settlement started (tick=${intervalMs}ms)`);
 }
 
+function startLudoContestJoinCleanup(session) {
+  if (ludoContestJoinCleanupTimerId) {
+    return;
+  }
+
+  const intervalMs = Number(process.env.LUDO_CONTEST_JOIN_CLEANUP_TICK_MS || 30000);
+  const { LudoContestJoinCleanupService } = require('./services/ludoContestJoinCleanupService');
+  ludoContestJoinCleanupService = new LudoContestJoinCleanupService(session);
+
+  ludoContestJoinCleanupTimerId = setInterval(() => {
+    ludoContestJoinCleanupService.processContestJoinCleanup().catch(() => {});
+  }, intervalMs);
+  console.log(`[Cron] Ludo contest_join cleanup started (tick=${intervalMs}ms)`);
+}
+
 function stopLudoUserTimers() {
   if (!ludoUserTimerStarted) {
     return;
@@ -107,6 +124,14 @@ function stopLudoSettlement() {
     ludoSettlementTimerId = null;
   }
   ludoSettlementService = null;
+}
+
+function stopLudoContestJoinCleanup() {
+  if (ludoContestJoinCleanupTimerId) {
+    clearInterval(ludoContestJoinCleanupTimerId);
+    ludoContestJoinCleanupTimerId = null;
+  }
+  ludoContestJoinCleanupService = null;
 }
 
 // ============================================================================
@@ -270,6 +295,7 @@ async function initializeCronService(io = null) {
   startLudoMatchmaking(mysqlSession);
   startLudoUserTimers();
   startLudoSettlement(mysqlSession);
+  startLudoContestJoinCleanup(mysqlSession);
 
   isRunning = true;
   console.log('[Cron] initializeCronService completed');
@@ -283,6 +309,7 @@ function stopCronService() {
   stopLudoMatchmaking();
   stopLudoUserTimers();
   stopLudoSettlement();
+  stopLudoContestJoinCleanup();
 
   isRunning = false;
   mysqlSession = null;

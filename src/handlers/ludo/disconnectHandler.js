@@ -1,4 +1,5 @@
 const { redis } = require('../../utils/redis');
+const { REDIS_KEYS } = require('../../constants');
 
 function normalize(value) {
   if (value === null || value === undefined) return '';
@@ -16,19 +17,45 @@ function getUserIDFromSocket(socket) {
 async function cleanupSocketMappings(socket) {
   const socketId = normalize(socket?.id);
   const userId = getUserIDFromSocket(socket);
+  const lidFromSocket = normalize(socket?.user?.contest_join_data?.l_id || socket?.contestJoinData?.l_id);
 
   if (socketId) {
     try {
-      await redis.del(`socket_to_user:${socketId}`);
+      await redis.del(REDIS_KEYS.SOCKET_TO_USER(socketId));
     } catch (_) {
     }
   }
 
   if (userId) {
     try {
-      const mappedSocketId = normalize(await redis.get(`user_to_socket:${userId}`));
+      const mappedSocketId = normalize(await redis.get(REDIS_KEYS.USER_TO_SOCKET(userId)));
       if (!mappedSocketId || mappedSocketId === socketId) {
-        await redis.del(`user_to_socket:${userId}`);
+        await redis.del(REDIS_KEYS.USER_TO_SOCKET(userId));
+      }
+    } catch (_) {
+    }
+  }
+
+  let lid = lidFromSocket;
+  if (!lid && socketId) {
+    try {
+      lid = normalize(await redis.get(REDIS_KEYS.SOCKET_TO_LID(socketId)));
+    } catch (_) {
+    }
+  }
+
+  if (socketId) {
+    try {
+      await redis.del(REDIS_KEYS.SOCKET_TO_LID(socketId));
+    } catch (_) {
+    }
+  }
+
+  if (lid) {
+    try {
+      const mappedSocketId = normalize(await redis.get(REDIS_KEYS.LID_TO_SOCKET(lid)));
+      if (!mappedSocketId || mappedSocketId === socketId) {
+        await redis.del(REDIS_KEYS.LID_TO_SOCKET(lid));
       }
     } catch (_) {
     }
