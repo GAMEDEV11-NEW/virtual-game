@@ -4,7 +4,7 @@
 // ============================================================================
 
 const cassandra = require('cassandra-driver');
-const { WalletService } = require('../../services/common/walletService');
+const { WalletService } = require('./walletService');
 const { redis: redisClient } = require('../../utils/redis');
 
 const INSERT_WINNER = `INSERT INTO winner_declarations (

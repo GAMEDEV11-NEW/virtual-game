@@ -10,7 +10,7 @@ const {
   markGameAsComplete: baseMarkGameAsComplete,
   cleanupRedisMatchData: baseCleanupRedisMatchData,
   updateLeagueJoinStatus
-} = require('../common/baseWindeclearService');
+} = require('./baseWindeclearService');
 
 // ============================================================================
 // Credit wallet (win fields only)

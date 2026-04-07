@@ -111,7 +111,7 @@ function isOvershootHome(fromPos, toPos) {
 // ============================================================================
 function validatePieceMovePayload(socket, moveData) {
   const requiredFields = [
-    'game_id', 'user_id', 'piece_id',
+    'game_id', 'contest_id', 'user_id', 'piece_id',
     'from_pos_last', 'to_pos_last', 'piece_type', 'dice_number'
   ];
   if (!validateRequiredFields(socket, moveData, requiredFields, 'piece:move:response')) {
@@ -169,6 +169,19 @@ async function fetchAndValidateMatch(socket, gameID) {
     return { isValid: false };
   }
   return { isValid: true, match };
+}
+
+function validateUserInMatch(socket, match, userID) {
+  if (!sameId(userID, match.user1_id) && !sameId(userID, match.user2_id)) {
+    emitStandardError(socket, {
+      code: ERROR_CODES.INVALID_USER || 'invalid_user',
+      type: ERROR_TYPES.DATA || 'data',
+      field: 'user_id',
+      message: 'User not part of this match'
+    }, 'piece:move:response');
+    return { isValid: false };
+  }
+  return { isValid: true };
 }
 
 // ============================================================================
@@ -347,6 +360,8 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
       ...normalizedMove,
       turn: matchForNotify.turn,
       timestamp: new Date().toISOString(),
+      user1_score: parseInt(matchForNotify.user1_score) || 0,
+      user2_score: parseInt(matchForNotify.user2_score) || 0,
       user1_pieces: matchForNotify.user1_pieces || [],
       user2_pieces: matchForNotify.user2_pieces || [],
     };
@@ -368,6 +383,8 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
       {
         ...normalizedMove,
         turn: matchForNotify.turn,
+        user1_score: parseInt(matchForNotify.user1_score) || 0,
+        user2_score: parseInt(matchForNotify.user2_score) || 0,
         user1_pieces: matchForNotify.user1_pieces || [],
         user2_pieces: matchForNotify.user2_pieces || [],
       },
@@ -411,6 +428,7 @@ function registerPieceMoveHandler(io, socket) {
           return;
         }
       const { moveData: validatedMoveData } = payloadValidation;
+      const currentUserId = normalizeIdValue(user.user_id);
       
       const gameState = await fetchAndValidateMatch(socket, validatedMoveData.game_id);
       if (!gameState.isValid) {
@@ -427,10 +445,16 @@ function registerPieceMoveHandler(io, socket) {
       }
 
       if (!match.previousTurn || !sameId(match.previousTurn, user.user_id)) {
-        match.turnCount[user.user_id] += 1;
+        match.turnCount[user.user_id] = (match.turnCount[user.user_id] || 0) + 1;
       }
       match.previousTurn = user.user_id;
       
+      const membershipValidation = validateUserInMatch(socket, match, user.user_id);
+      if (!membershipValidation.isValid) {
+        responseGuarantee.markAsSent();
+        return;
+      }
+
       if (match.status === GAME_STATUS.COMPLETED) {
         emitStandardError(socket, {
           code: ERROR_CODES.GAME_ALREADY_COMPLETED,
@@ -509,6 +533,11 @@ function registerPieceMoveHandler(io, socket) {
         return;
       }
       const { moveResponse } = moveResult;
+      // Always include score fields in piece:move response for consistent client parsing.
+      moveResponse.score_earned = 0;
+      moveResponse.score_reasons = ['no_score_for_this_move'];
+      moveResponse.bonus_score = 0;
+      moveResponse.total_score = 0;
 
       const freshMatchAfterMove = await reloadMatchFromRedis(validatedMoveData.game_id);
       const workingMatch = freshMatchAfterMove || match;
@@ -620,14 +649,37 @@ function registerPieceMoveHandler(io, socket) {
           
           workingMatch.updated_at = new Date().toISOString();
           
+          const currentTotal = sameId(workingMatch.user1_id, currentUserId)
+            ? (parseInt(workingMatch.user1_score) || 0)
+            : (parseInt(workingMatch.user2_score) || 0);
           moveResponse.score_earned = scoreResult.points;
-          moveResponse.score_reasons = scoreResult.reasons;
+          moveResponse.score_reasons = Array.isArray(scoreResult.reasons) && scoreResult.reasons.length > 0
+            ? scoreResult.reasons
+            : ['score_applied'];
+          moveResponse.bonus_score = scoreResult.bonusScore || 0;
+          moveResponse.total_score = currentTotal;
+        } else {
+          const currentTotal = sameId(workingMatch.user1_id, currentUserId)
+            ? (parseInt(workingMatch.user1_score) || 0)
+            : (parseInt(workingMatch.user2_score) || 0);
+          moveResponse.score_earned = 0;
+          moveResponse.score_reasons = Array.isArray(scoreResult.reasons) && scoreResult.reasons.length > 0
+            ? scoreResult.reasons
+            : ['no_score_for_this_move'];
+          moveResponse.bonus_score = scoreResult.bonusScore || 0;
+          moveResponse.total_score = currentTotal;
         }
       } catch (scoreError) {
         logHandlerError('scorePieceMove failed', scoreError, {
           gameID: validatedMoveData.game_id,
           userID: user.user_id
         });
+        moveResponse.score_earned = 0;
+        moveResponse.score_reasons = ['scoring_failed'];
+        moveResponse.bonus_score = 0;
+        moveResponse.total_score = sameId(workingMatch.user1_id, currentUserId)
+          ? (parseInt(workingMatch.user1_score) || 0)
+          : (parseInt(workingMatch.user2_score) || 0);
       }
 
       const { checkForGameWin } = require('../../utils/gameUtils');
@@ -780,17 +832,18 @@ function registerPieceMoveHandler(io, socket) {
                 });
               }
             }
-          } else {
-            socket.emit('piece:move:response', {
-              status: 'error',
-              message: 'Game win detected but failed to process winner declaration. Please try again.',
-              error: winnerResult.error,
-              game_id: validatedMoveData.game_id,
-              timestamp: new Date().toISOString()
-            });
-            
-            return;
-          }
+	          } else {
+	            if (!responseGuarantee.isResponseSent()) {
+	              responseGuarantee.sendError({
+	                code: 'winner_declaration_failed',
+	                type: 'system',
+	                message: 'Game win detected but failed to process winner declaration. Please try again.',
+	                event: 'piece:move:response'
+	              });
+	            }
+	            
+	            return;
+	          }
         }
       } catch (err) {
         logHandlerError('checkForGameWin threw error', err, {
@@ -847,17 +900,18 @@ function registerPieceMoveHandler(io, socket) {
             gameID: validatedMoveData.game_id
           });
         }
-      } else if (gameWon && !winnerInfo) {
-        socket.emit('piece:move:response', {
-          status: 'error',
-          message: 'Game win detected but winner information is missing. Please try again.',
-          error: 'Missing winner information',
-          game_id: validatedMoveData.game_id,
-          timestamp: new Date().toISOString()
-        });
-        
-        return;
-      } else if (isHomeReach) {
+	      } else if (gameWon && !winnerInfo) {
+	        if (!responseGuarantee.isResponseSent()) {
+	          responseGuarantee.sendError({
+	            code: 'winner_info_missing',
+	            type: 'system',
+	            message: 'Game win detected but winner information is missing. Please try again.',
+	            event: 'piece:move:response'
+	          });
+	        }
+	        
+	        return;
+	      } else if (isHomeReach) {
         const homeReachResult = await handleHomeReachBonus(
           validatedMoveData.game_id,
           user.user_id

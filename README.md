@@ -2,6 +2,7 @@
 
 ## 📋 Table of Contents
 
+0. [Current Ludo Flow (Authoritative)](#-current-ludo-flow-authoritative)
 1. [Project Overview](#project-overview)
 2. [System Architecture](#system-architecture)
 3. [Application Flow](#application-flow)
@@ -20,6 +21,126 @@
 16. [Security](#security)
 17. [Deployment](#deployment)
 18. [Troubleshooting](#troubleshooting)
+
+---
+
+## ✅ Current Ludo Flow (Authoritative)
+
+This section is the current, source-of-truth flow for Ludo in this codebase.
+If any old section below conflicts with this, follow this section.
+
+### Current Runtime Stack (Ludo)
+
+- Server: Node.js + Fastify + Socket.IO
+- Match/game state: Redis (ElastiCache)
+- Persistent game records: MySQL (Aurora MySQL 8)
+- Archive payload: S3 (for game snapshots)
+- Background processing: separate cron worker process
+
+### Process Split (Important)
+
+Run these as separate processes:
+
+- `npm run start:server`  
+  Handles socket connect/auth + gameplay events.
+- `npm run start:cron`  
+  Handles matchmaking, timer timeout/chance progression, stale cleanup/settlement.
+- `npm run start:admin`  
+  Admin UI/API (live + history + user admin).
+
+### Ludo End-to-End Flow
+
+1. Socket connect (`user_id`, `contest_id`, `l_id`)
+- Server validates auth/session and enforces l_id uniqueness rules.
+- Connection mappings are stored in Redis (`user_to_socket`, `socket_to_user`).
+
+2. Contest join entry
+- User join state is written to Redis (`contest_join:<user_id>:<contest_id>:<l_id>`).
+- MySQL row is upserted in `ludo_game` with pending status.
+
+3. Matchmaking (cron tick)
+- Cron loads pending rows from MySQL (`ludo_game` pending).
+- Pairs compatible users and creates match id.
+- Writes initial match state to Redis `match:<game_id>`.
+- Writes routing key `match_server:<game_id>:<server_id>`.
+- Updates both users in MySQL to matched and stores generated dice/piece ids.
+
+4. `check:opponent` polling (client)
+- Redis-first read for speed; MySQL fallback if needed.
+- Returns:
+  - `pending` while waiting/preparing
+  - `success` when game state ready (game_id + pieces + dice)
+  - `expired` when entry expired
+  - `completed` for already finished game
+
+5. `get:match_state`
+- Reads `match:<game_id>` from Redis.
+- Validates requesting user belongs to that match.
+- Returns full state + `user1_time_left_seconds`, `user2_time_left_seconds`.
+
+6. Gameplay events
+- `dice:roll`: validates turn, rolls dice, updates turn/chance/score state in Redis.
+- `piece:move`: validates move + first-six/home rules + kill/home-reach/win, persists Redis state, notifies opponent.
+- `quit:game`: marks game completion path and winner handling flow.
+
+7. Timer/timeout processing (cron)
+- Cron scans `match_server:*:<server_id>`.
+- Loads each `match:<game_id>`.
+- Applies timeout/chance decrement and turn switching.
+- For terminal states: winner declaration path + archive + cleanup.
+
+8. Completion/cleanup
+- Match archived to S3.
+- Redis match keys are removed (`match:<game_id>` and `match_server:<game_id>:*`).
+- MySQL status is finalized (`completed`/winner metadata).
+
+### Redis Keys Used (Ludo)
+
+- `contest_join:<user_id>:<contest_id>:<l_id>`
+- `user_to_socket:<user_id>`
+- `socket_to_user:<socket_id>`
+- `match:<game_id>`
+- `match_server:<game_id>:<server_id>`
+
+### MySQL Primary Table (Ludo)
+
+Primary runtime table:
+
+- `ludo_game`
+
+Core status progression:
+
+- `pending` -> `matched` -> `active` -> `completed` / `expired`
+
+### Full Flow Test Command
+
+Single command full flow test (auto poll + dice + piece move):
+
+```bash
+SOCKET_TEST_USER_ID=1234 \
+SOCKET_TEST_CONTEST_ID=9 \
+SOCKET_TEST_L_ID=lj_1234_9_$(date +%s) \
+SOCKET_TEST_RUN_DICE=true \
+SOCKET_TEST_RUN_PIECE_MOVE=true \
+SOCKET_TEST_MATCH_WAIT_MS=60000 \
+SOCKET_TEST_MATCH_POLL_INTERVAL_MS=2000 \
+npm run test:ludo-flow
+```
+
+Full game simulation (two users, turn-by-turn until completion/max turns):
+
+```bash
+SOCKET_TEST_FULL_GAME=true \
+SOCKET_TEST_USER_ID=1234 \
+SOCKET_TEST_SECOND_USER_ID=789 \
+SOCKET_TEST_CONTEST_ID=9 \
+SOCKET_TEST_L_ID=lj_1234_9_$(date +%s) \
+SOCKET_TEST_SECOND_L_ID=lj_789_9_$(date +%s) \
+SOCKET_TEST_RUN_DICE=true \
+SOCKET_TEST_RUN_PIECE_MOVE=true \
+SOCKET_TEST_MAX_TURNS=300 \
+npm run test:ludo-flow
+```
 
 ---
 
@@ -1924,6 +2045,8 @@ You already have scripts for this in `package.json`:
 ```bash
 npm run start:server   # starts src/server.js with --no-cron
 npm run start:cron     # starts src/cron-worker.js
+npm run start:admin
+npm run mock:apis
 ```
 
 How it works:

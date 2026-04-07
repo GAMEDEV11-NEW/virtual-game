@@ -11,7 +11,7 @@ const {
   markGameAsComplete: baseMarkGameAsComplete,
   cleanupRedisMatchData: baseCleanupRedisMatchData,
   updateLeagueJoinStatus
-} = require('../common/baseWindeclearService');
+} = require('./baseWindeclearService');
 
 // ============================================================================
 // Credit wallet - only update win and win_cr (NOT balance)

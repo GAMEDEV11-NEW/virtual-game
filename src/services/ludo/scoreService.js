@@ -2,6 +2,18 @@ const { redis: redisClient } = require('../../utils/redis');
 const { safeParseRedisData } = require('../../utils/gameUtils');
 const { REDIS_KEYS } = require('../../constants');
 
+function normalizeId(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function sameId(a, b) {
+  const na = normalizeId(a);
+  const nb = normalizeId(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
+
 // ============================================================================
 // Update match score
 // ============================================================================
@@ -14,7 +26,9 @@ async function updateMatchScore(gameId, userId, scoreToAdd, scoreReason = '') {
     if (!matchData) throw new Error('Match not found');
     let isUser1 = false;
     let isUser2 = false;
-    if (matchData.user1_id === userId) isUser1 = true; else if (matchData.user2_id === userId) isUser2 = true; else throw new Error('User not part of this match');
+    if (sameId(matchData.user1_id, userId)) isUser1 = true;
+    else if (sameId(matchData.user2_id, userId)) isUser2 = true;
+    else throw new Error('User not part of this match');
     if (!matchData.scores) matchData.scores = {};
     let currentScore = 0;
     if (isUser1) currentScore = parseInt(matchData.user1_score) || 0; else currentScore = parseInt(matchData.user2_score) || 0;

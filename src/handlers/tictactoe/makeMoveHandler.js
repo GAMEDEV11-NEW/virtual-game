@@ -223,7 +223,7 @@ async function registerMakeMoveHandler(io, socket) {
               };
               
               try {
-                const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
+                const { updateMatchPairToCompleted } = require('../../services/tictactoe/baseWindeclearService');
                 await updateMatchPairToCompleted(game_id);
               } catch (safeguardErr) {}
             }
@@ -235,7 +235,7 @@ async function registerMakeMoveHandler(io, socket) {
                 };
             
             try {
-              const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
+              const { updateMatchPairToCompleted } = require('../../services/tictactoe/baseWindeclearService');
               await updateMatchPairToCompleted(game_id);
             } catch (safeguardErr) {}
           }

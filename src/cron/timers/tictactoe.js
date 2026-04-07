@@ -639,7 +639,7 @@ async function completeTicTacToeGame(gameId, redisInstance, matchData = null) {
   
   if (gameId != null) {
     try {
-      const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
+      const { updateMatchPairToCompleted } = require('../../services/tictactoe/baseWindeclearService');
       await updateMatchPairToCompleted(gameId);
     } catch (err) {
       if (tictactoeMatchmakingService) {

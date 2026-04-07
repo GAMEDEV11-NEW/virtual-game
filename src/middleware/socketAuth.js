@@ -5,6 +5,23 @@ const { REDIS_KEYS, DB_QUERIES } = require('../constants');
 const { config } = require('../utils/config');
 const axios = require('axios');
 
+function normalizeAuthToken(value) {
+  const raw = normalizeString(value);
+  if (!raw) return '';
+  const match = raw.match(/^Bearer\s+(.+)$/i);
+  return match ? normalizeString(match[1]) : raw;
+}
+
+function extractSocketJwtToken(socket) {
+  return normalizeAuthToken(
+    socket?.handshake?.auth?.jwt_token ||
+    socket?.handshake?.query?.jwt_token ||
+    socket?.handshake?.headers?.authorization ||
+    socket?.handshake?.headers?.Authorization ||
+    ''
+  );
+}
+
 function pickContestRecord(contestJoinData, contestId) {
   if (!contestJoinData) return null;
   if (Array.isArray(contestJoinData)) {
@@ -161,52 +178,121 @@ async function storeContestJoinSnapshot(userId, contestId, contestJoinData, clie
   return snapshot;
 }
 
-function extractContestJoinPayload(apiData) {
+function buildNormalizedValidateUserPayload(apiData, fallback = {}) {
+  if (!apiData || typeof apiData !== 'object') return null;
+
+  // New validate-user response contract:
+  // { status: 1, result: { ... } }
+  if (Object.prototype.hasOwnProperty.call(apiData, 'status') && apiData.result && typeof apiData.result === 'object') {
+    const statusCode = Number(apiData.status);
+    const result = apiData.result || {};
+    const message = normalizeString(apiData.message) || 'validate-user failed';
+
+    if (statusCode !== 1) {
+      throw new Error(message);
+    }
+    if (result.valid === false) {
+      throw new Error('User validation failed');
+    }
+    if (result.blocked) {
+      throw new Error('User is blocked');
+    }
+    if (result.joinDisabled) {
+      throw new Error('Join is disabled');
+    }
+
+    const session = result.session && typeof result.session === 'object' ? result.session : {};
+    const lobby = result.lobby && typeof result.lobby === 'object' ? result.lobby : {};
+    const game = result.game && typeof result.game === 'object' ? result.game : {};
+    const gameMode = result.gameMode && typeof result.gameMode === 'object' ? result.gameMode : {};
+
+    const gameId = normalizeString(result.gameId || game.id);
+    const contestId = normalizeString(session.lobbyId || lobby.id || fallback.contestId || '');
+    const sessionId = normalizeString(session.sessionId || fallback.lId || '');
+    const joinedAt = normalizeString(apiData.time_stamp || new Date().toISOString());
+
+    return {
+      user_id: normalizeString(result.userId || fallback.userId || ''),
+      contest_id: contestId,
+      league_id: contestId,
+      l_id: sessionId,
+      game_type: gameId === '1' ? 'ludo' : '',
+      contest_type: gameId === '1' ? 'simpleludo' : '',
+      entry_fee: lobby.entryFee ?? null,
+      joined_at: joinedAt,
+      status: normalizeString(session.status || 'pending') || 'pending',
+      status_id: '1',
+      opponent_user_id: '',
+      opponent_league_id: '',
+      match_pair_id: '',
+      turn_id: '',
+      extra_data: {
+        valid: result.valid !== false,
+        gameId: gameId || null,
+        gameModeId: result.gameModeId ?? null,
+        gameHistoryId: normalizeString(result.gameHistoryId || session.gameHistoryId || ''),
+        activationStatus: normalizeString(result.activationStatus || ''),
+        blocked: !!result.blocked,
+        joinDisabled: !!result.joinDisabled,
+        lobby,
+        game,
+        gameMode,
+        session
+      }
+    };
+  }
+
+  return null;
+}
+
+function extractContestJoinPayload(apiData, fallback = {}) {
+  const normalizedValidatePayload = buildNormalizedValidateUserPayload(apiData, fallback);
+  if (normalizedValidatePayload) return normalizedValidatePayload;
   if (!apiData) return null;
   if (typeof apiData === 'object' && apiData.contest_join !== undefined) return apiData.contest_join;
   if (typeof apiData === 'object' && apiData.data !== undefined) return apiData.data;
   return apiData;
 }
 
-async function fetchContestJoinData(userId, contestId = '') {
+async function fetchContestJoinData(userId, contestId = '', jwtToken = '', lId = '') {
   const baseUrl = (process.env.CONTEST_JOIN_API_BASE_URL || '').trim();
-  const endpoint = (process.env.CONTEST_JOIN_API_ENDPOINT || '/contest-join/{userId}').trim();
-  const method = (process.env.CONTEST_JOIN_API_METHOD || 'GET').toUpperCase();
+  const endpoint = (process.env.CONTEST_JOIN_API_ENDPOINT || '').trim();
+  const method = 'POST';
   const timeout = Number(process.env.CONTEST_JOIN_API_TIMEOUT_MS || 5000);
+  const gameMatchKey = (process.env.CONTEST_JOIN_API_GAME_MATCH_KEY || '').trim();
 
   if (!baseUrl) {
     throw new Error('Contest join API is not configured');
   }
+  if (!endpoint) {
+    throw new Error('Contest join API endpoint is not configured');
+  }
+  if (!gameMatchKey) {
+    throw new Error('Contest join API game match key is not configured');
+  }
 
   const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  const withUserPath = normalizedEndpoint.includes('{userId}')
-    ? normalizedEndpoint.replace('{userId}', encodeURIComponent(String(userId)))
-    : normalizedEndpoint;
-  const withContestPath = withUserPath.includes('{contestId}')
-    ? withUserPath.replace('{contestId}', encodeURIComponent(String(contestId || '')))
-    : withUserPath;
-  const url = `${normalizedBaseUrl}${withContestPath}`;
+  const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
 
-  const headers = {};
-  if (process.env.CONTEST_JOIN_API_BEARER_TOKEN) {
-    headers.Authorization = `Bearer ${process.env.CONTEST_JOIN_API_BEARER_TOKEN}`;
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+  const authToken = normalizeAuthToken(jwtToken) || normalizeAuthToken(process.env.CONTEST_JOIN_API_BEARER_TOKEN);
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
   }
-  if (process.env.CONTEST_JOIN_API_KEY) {
-    headers['x-api-key'] = process.env.CONTEST_JOIN_API_KEY;
-  }
+  headers['X-Game-Match-Key'] = gameMatchKey;
 
   const reqConfig = { url, method, headers, timeout };
-  if (method === 'GET') {
-    reqConfig.params = { user_id: userId };
-    if (contestId) reqConfig.params.contest_id = contestId;
-  } else {
-    reqConfig.data = { user_id: userId, contest_id: contestId || undefined };
-  }
+  reqConfig.data = {
+    userId: Number.isNaN(Number(userId)) ? String(userId) : Number(userId),
+    sessionId: normalizeString(lId)
+  };
 
   try {
     const response = await axios(reqConfig);
-    return extractContestJoinPayload(response.data);
+    return extractContestJoinPayload(response.data, { userId, contestId, lId });
   } catch (err) {
     const responseMessage = err.response?.data?.message || err.response?.data?.error;
     const message = responseMessage || err.message || 'Contest join API request failed';
@@ -231,26 +317,32 @@ async function socketAuthMiddleware(socket, next) {
     socket.handshake.auth?.l_id ||
     socket.handshake.query?.l_id ||
     '';
+  const jwtToken = extractSocketJwtToken(socket);
 
   const required = {
     user_id: normalizeString(userId),
     contest_id: normalizeString(contestId),
-    l_id: normalizeString(clientLid)
+    l_id: normalizeString(clientLid),
+    jwt_token: normalizeString(jwtToken)
   };
 
-  if (!required.user_id || !required.contest_id || !required.l_id) {
-    return next(new Error('Authentication error: user_id, contest_id and l_id are required'));
+  if (!required.user_id || !required.contest_id || !required.l_id || !required.jwt_token) {
+    return next(new Error('Authentication error: user_id, contest_id, l_id and jwt_token are required'));
   }
 
   try {
+    // 1) First check contest eligibility from API after basic required-field validation.
+    const contestJoinData = await fetchContestJoinData(required.user_id, required.contest_id, required.jwt_token, required.l_id);
+
+    // 2) Then validate l_id lifecycle/uniqueness.
     await validateLidUniquenessOrThrow({
       userId: required.user_id,
       contestId: required.contest_id,
       lId: required.l_id
     });
 
+    // 3) Then continue session/socket mapping flow.
     const existingSession = await sessionService.getSessionOrThrow(required.user_id, { skipRedisRead: true });
-    const contestJoinData = await fetchContestJoinData(required.user_id, required.contest_id);
     
     if (existingSession) {
       if (existingSession.socket_id && existingSession.socket_id !== socketId) {
@@ -286,6 +378,7 @@ async function socketAuthMiddleware(socket, next) {
       user_id: required.user_id,
       contest_id: required.contest_id,
       l_id: required.l_id,
+      jwt_token: required.jwt_token,
       session_token: existingSession?.session_token || '',
       contest_join_data: contestJoinSnapshot
     };

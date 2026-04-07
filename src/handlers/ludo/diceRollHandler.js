@@ -715,8 +715,12 @@ function handleFirstTimeRoll(match, user_id, response, canMoveAfterRoll, opponen
 // ============================================================================
 function handleAllPiecesAtHomeLogic(match, user_id, response, canStartWithSix, opponentId) {
   const updatedNow = new Date();
+  const firstSixKey = getFirstSixKey(match, user_id);
 
   if (canStartWithSix) {
+    if (response.dice_number === 6 && firstSixKey) {
+      match[firstSixKey] = true;
+    }
     match.turn = user_id;
     match.user1_time = updatedNow.toISOString();
     match.user2_time = updatedNow.toISOString();
@@ -1067,6 +1071,8 @@ async function scoreDiceRollAndUpdateResponse(response, match, user_id) {
 async function notifyPlayers(socket, io, game_id, match, response, user_id, responseGuarantee = null) {
   try {
     response.turn = match.turn;
+    response.user1_score = parseInt(match.user1_score) || 0;
+    response.user2_score = parseInt(match.user2_score) || 0;
 
     // Ensure gets_another_turn is set based on turn
     if (response.dice_number === 6 && sameId(match.turn, user_id) && !response.gets_another_turn) {

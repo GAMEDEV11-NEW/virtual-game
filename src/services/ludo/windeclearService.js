@@ -1,50 +1,52 @@
+const axios = require('axios');
 const { redis: redisClient, safeParseRedisData } = require('../../utils/redis');
 const { REDIS_KEYS, GAME_STATUS } = require('../../constants');
-const { toISOString } = require('../../utils/dateUtils');
 const { getCurrentDate } = require('../../utils/dateUtils');
 const { archiveLudoGameState } = require('./archiveService');
+const { updateMatchPairStatus } = require('./gameService');
+const mysqlClient = require('../mysql/client');
 
-const {
-  getLeagueJoinInfoForGame,
-  creditUserWalletForWin: baseCreditUserWalletForWin,
-  recordWinTransaction: baseRecordWinTransaction,
-  insertWinnerDeclaration: baseInsertWinnerDeclaration,
-  updateMatchPairToWinnerDeclared: baseUpdateMatchPairToWinnerDeclared,
-  markGameAsComplete: baseMarkGameAsComplete,
-  cleanupRedisMatchData: baseCleanupRedisMatchData,
-  updateLeagueJoinStatus
-} = require('../common/baseWindeclearService');
+async function notifyWinnerApi(payload) {
+  const url = String(process.env.LUDO_WINNER_API_URL || '').trim();
+  if (!url) {
+    return { success: true, skipped: true, reason: 'winner_api_url_not_configured' };
+  }
 
-// ============================================================================
-// Credit wallet without updating balance (only win/win_cr)
-// ============================================================================
-async function creditUserWalletForWin(userID, amount) {
-  return baseCreditUserWalletForWin(userID, amount, { updateBalance: false });
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const bearer = String(process.env.LUDO_WINNER_API_BEARER_TOKEN || '').trim();
+    const apiKey = String(process.env.LUDO_WINNER_API_KEY || '').trim();
+    if (bearer) headers.Authorization = `Bearer ${bearer}`;
+    if (apiKey) headers['x-api-key'] = apiKey;
+
+    const timeout = Number(process.env.LUDO_WINNER_API_TIMEOUT_MS || 5000);
+    await axios.post(url, payload, {
+      headers,
+      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error?.message || 'winner_api_failed' };
+  }
 }
 
-// ============================================================================
-// Record transaction with 'credit' type
-// ============================================================================
-async function recordWinTransaction(userID, info, amount, balanceAfter = 0, winAfter = 0, previousWin = 0, winCrAfter = 0, previousWinCr = 0, details = '') {
-  return baseRecordWinTransaction(userID, info, amount, balanceAfter, winAfter, previousWin, winCrAfter, previousWinCr, {
-    txnType: 'credit',
-    details: details || 'Game win credit - ludo',
-    action: 'game_win'
-  });
-}
-
-// ============================================================================
-// Insert winner declaration
-// ============================================================================
-async function insertWinnerDeclaration(gameId, userId, leagueId, contestId, status, gameEndReason = 'game_completed', prizeAmount = 0.0, userScore = 0.0, user1Score = 0.0, user2Score = 0.0) {
-  return baseInsertWinnerDeclaration(gameId, userId, leagueId, contestId, status, gameEndReason, prizeAmount, userScore, user1Score, user2Score);
-}
-
-// ============================================================================
-// Update match pair status
-// ============================================================================
-async function updateMatchPairToWinnerDeclared(gameId) {
-  return baseUpdateMatchPairToWinnerDeclared(gameId);
+async function updateMysqlGameWinner(gameId, winnerId, gameEndReason) {
+  try {
+    const endedAt = new Date();
+    await mysqlClient.execute(
+      `UPDATE ludo_game
+       SET status = ?,
+           status_id = ?,
+           winner_user_id = ?,
+           ended_at = COALESCE(ended_at, ?),
+           updated_at = NOW(3)
+       WHERE match_id = ? AND is_deleted = 0`,
+      [GAME_STATUS.COMPLETED, 3, winnerId, endedAt, gameId]
+    );
+    return { success: true, endedAt: endedAt.toISOString() };
+  } catch (error) {
+    return { success: false, error: error?.message || 'mysql_winner_update_failed' };
+  }
 }
 
 // ============================================================================
@@ -64,7 +66,13 @@ async function cleanupRedisMatchData(gameId, finalMatchData = null) {
   } catch (_) {
   }
 
-  const result = await baseCleanupRedisMatchData(gameId, 'ludo', REDIS_KEYS);
+  let result = true;
+  try {
+    await redisClient.del(REDIS_KEYS.MATCH(gameId));
+  } catch (_) {
+    result = false;
+  }
+
   try {
     const matchServerKeys = await redisClient.scan(`match_server:${String(gameId)}:*`, { count: 100 });
     if (Array.isArray(matchServerKeys) && matchServerKeys.length > 0) {
@@ -75,84 +83,126 @@ async function cleanupRedisMatchData(gameId, finalMatchData = null) {
         }
       }
     }
-  } catch (_) {}
-  
-  // Also clear winner declaration key if it exists
+  } catch (_) {
+  }
+
   try {
     await redisClient.del(`ludo_winner_declared:${gameId}`);
-  } catch (_) {}
-  
+  } catch (_) {
+  }
+
   return result;
 }
 
 // ============================================================================
-// Mark game as complete
+// Mark game as complete in Redis state
 // ============================================================================
 async function markGameAsComplete(gameId, winnerId, gameEndReason = 'game_completed') {
-  return baseMarkGameAsComplete(gameId, winnerId, gameEndReason, 'ludo');
-}
-
-// ============================================================================
-// Process winner declaration for ludo game
-// ============================================================================
-async function processWinnerDeclaration(gameId, winnerId, loserId, contestId, gameEndReason = 'game_completed', winnerScore = 0.0, loserScore = 0.0, user1Score = 0.0, user2Score = 0.0) {
   try {
-    const now = getCurrentDate();
-    
-    const joinInfo = await getLeagueJoinInfoForGame(winnerId, gameId);
-    const loserJoinInfo = await getLeagueJoinInfoForGame(loserId, gameId);
-    const derivedEntryFee = joinInfo && typeof joinInfo.entryFee !== 'undefined' ? parseFloat(joinInfo.entryFee) : 0;
-    const entryFeeAmount = isNaN(derivedEntryFee) ? 0 : derivedEntryFee;
-    const prizeAmount = entryFeeAmount * 2;
-    
-    const actualLeagueId = (joinInfo && joinInfo.leagueId) ? joinInfo.leagueId : '';
-    const actualContestId = contestId || (joinInfo && joinInfo.extraData && joinInfo.extraData.contest_id) || '';
+    const raw = await redisClient.get(REDIS_KEYS.MATCH(gameId));
+    const match = safeParseRedisData(raw);
+    if (!match || typeof match !== 'object') return true;
 
-    const ok1 = await insertWinnerDeclaration(gameId, winnerId, actualLeagueId, actualContestId, 'WIN', gameEndReason, prizeAmount, winnerScore, user1Score, user2Score);
-    const ok2 = await insertWinnerDeclaration(gameId, loserId, actualLeagueId, actualContestId, 'LOSS', gameEndReason, 0.0, loserScore, user1Score, user2Score);
-    const ok3 = await updateMatchPairToWinnerDeclared(gameId);
-    const ok4 = await markGameAsComplete(gameId, winnerId, gameEndReason);
+    const nowIso = new Date().toISOString();
+    match.status = GAME_STATUS.COMPLETED;
+    match.winner = winnerId;
+    match.game_end_reason = gameEndReason;
+    match.completed_at = nowIso;
+    match.updated_at = nowIso;
 
-    await updateLeagueJoinStatus(winnerId, joinInfo, GAME_STATUS.COMPLETED);
-    await updateLeagueJoinStatus(loserId, loserJoinInfo, GAME_STATUS.COMPLETED);
-
-    const failedOps = [];
-    if (!ok1) failedOps.push('insertWinnerDeclaration(WIN)');
-    if (!ok2) failedOps.push('insertWinnerDeclaration(LOSS)');
-    if (!ok3) failedOps.push('updateMatchPairToWinnerDeclared');
-    
-    const criticalSuccess = ok1 && ok2 && ok3;
-    
-    let walletUpdated = false;
-    if (criticalSuccess && prizeAmount > 0) {
-      const walletRes = await creditUserWalletForWin(winnerId, prizeAmount);
-      walletUpdated = walletRes && walletRes.success === true;
-      await recordWinTransaction(winnerId, {
-        leagueId: joinInfo ? joinInfo.leagueId : undefined,
-        contestId,
-        matchPairId: joinInfo ? joinInfo.matchPairId : undefined,
-        entryFee: joinInfo ? joinInfo.entryFee : undefined,
-        gameEndReason,
-        gameId
-      }, prizeAmount,
-        walletRes && walletRes.balanceAfter ? walletRes.balanceAfter : 0,
-        walletRes && typeof walletRes.winAfter !== 'undefined' ? walletRes.winAfter : 0,
-        walletRes && typeof walletRes.previousWin !== 'undefined' ? walletRes.previousWin : 0,
-        walletRes && typeof walletRes.winCrAfter !== 'undefined' ? walletRes.winCrAfter : 0,
-        walletRes && typeof walletRes.previousWinCr !== 'undefined' ? walletRes.previousWinCr : 0,
-        `Ludo win credited: prize=${prizeAmount}`);
-    }
-
-    if (!criticalSuccess) {
-      const errorMsg = `Critical database operations failed: ${failedOps.join(', ')}`;
-      return { success: false, error: errorMsg, timestamp: now.toISOString(), prize_amount: prizeAmount, wallet_updated: walletUpdated };
-    }
-
-    return { success: true, timestamp: now.toISOString(), prize_amount: prizeAmount, wallet_updated: walletUpdated };
-  } catch (e) {
-    const errorMsg = e?.message || e?.toString() || 'Unknown error occurred';
-    return { success: false, error: errorMsg, errorStack: e?.stack || 'No stack trace available' };
+    await redisClient.set(REDIS_KEYS.MATCH(gameId), JSON.stringify(match));
+    return true;
+  } catch (_) {
+    return false;
   }
 }
 
-module.exports = { processWinnerDeclaration, insertWinnerDeclaration, updateMatchPairToWinnerDeclared, cleanupRedisMatchData, markGameAsComplete };
+// ============================================================================
+// Process winner declaration for ludo game (simplified: MySQL + one API)
+// ============================================================================
+async function processWinnerDeclaration(
+  gameId,
+  winnerId,
+  loserId,
+  contestId,
+  gameEndReason = 'game_completed',
+  winnerScore = 0.0,
+  loserScore = 0.0,
+  user1Score = 0.0,
+  user2Score = 0.0
+) {
+  try {
+    const now = getCurrentDate();
+    const timestamp = now.toISOString();
+
+    const matchStatusRes = await updateMatchPairStatus(gameId, GAME_STATUS.COMPLETED)
+      .then(() => ({ success: true }))
+      .catch((e) => ({ success: false, error: e?.message || 'match_status_update_failed' }));
+
+    const mysqlWinnerRes = await updateMysqlGameWinner(gameId, winnerId, gameEndReason);
+    const redisRes = await markGameAsComplete(gameId, winnerId, gameEndReason);
+
+    if (!mysqlWinnerRes.success || !redisRes) {
+      const errors = [];
+      if (!mysqlWinnerRes.success) errors.push(mysqlWinnerRes.error);
+      if (!redisRes) errors.push('redis_mark_complete_failed');
+      if (!matchStatusRes.success) errors.push(matchStatusRes.error);
+      return {
+        success: false,
+        error: errors.join(' | ') || 'winner_declaration_failed',
+        timestamp
+      };
+    }
+
+    const apiPayload = {
+      game_id: String(gameId || ''),
+      winner_user_id: String(winnerId || ''),
+      loser_user_id: String(loserId || ''),
+      contest_id: String(contestId || ''),
+      game_end_reason: String(gameEndReason || 'game_completed'),
+      winner_score: Number(winnerScore || 0),
+      loser_score: Number(loserScore || 0),
+      user1_score: Number(user1Score || 0),
+      user2_score: Number(user2Score || 0),
+      declared_at: timestamp
+    };
+
+    const winnerApiRes = await notifyWinnerApi(apiPayload);
+
+    return {
+      success: true,
+      timestamp,
+      api_called: !winnerApiRes.skipped,
+      api_status: winnerApiRes.success ? 'ok' : 'failed',
+      api_error: winnerApiRes.success ? '' : (winnerApiRes.error || 'winner_api_failed')
+    };
+  } catch (e) {
+    return {
+      success: false,
+      error: e?.message || e?.toString() || 'Unknown error occurred',
+      errorStack: e?.stack || 'No stack trace available'
+    };
+  }
+}
+
+// Kept for backward compatibility where imported elsewhere.
+async function insertWinnerDeclaration() {
+  return true;
+}
+
+async function updateMatchPairToWinnerDeclared(gameId) {
+  try {
+    await updateMatchPairStatus(gameId, GAME_STATUS.COMPLETED);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+module.exports = {
+  processWinnerDeclaration,
+  insertWinnerDeclaration,
+  updateMatchPairToWinnerDeclared,
+  cleanupRedisMatchData,
+  markGameAsComplete
+};

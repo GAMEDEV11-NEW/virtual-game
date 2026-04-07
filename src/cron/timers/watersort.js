@@ -503,7 +503,7 @@ async function completeWaterSortGame(gameId, key, redisInstance, matchData = nul
   // Always update match_pairs to 'completed' when game ends
   if (gameId != null) {
     try {
-      const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
+      const { updateMatchPairToCompleted } = require('../../services/watersort/baseWindeclearService');
       await updateMatchPairToCompleted(gameId);
     } catch (err) {
       if (matchmakingService) {

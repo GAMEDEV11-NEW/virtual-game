@@ -472,14 +472,6 @@ async function updateDatabaseRecords(gameId, opponentId, userId, contestId, matc
       await postProcessWinnerDeclaration(gameId, result, match);
     }
     
-    if (!result || !result.success) {
-      try {
-        const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
-        await updateMatchPairToCompleted(gameId);
-      } catch (err) {
-      }
-    }
-    
     return result && result.success !== false;
   } catch (error) {
     emitError(socket, {

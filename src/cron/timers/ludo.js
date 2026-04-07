@@ -23,8 +23,11 @@ let socketIOInstance = null;
 let ludoTimerIntervalId = null;
 const MATCH_TTL_SECONDS = REDIS_TTL.MATCH_SECONDS;
 let lastHeartbeatLogAt = 0;
+let lastCompletedSweepAt = 0;
 const HEARTBEAT_LOG_INTERVAL_MS = 30000;
 const LUDO_TIMER_MATCH_SCAN_COUNT = Number(process.env.LUDO_TIMER_MATCH_SCAN_COUNT || 10000);
+const LUDO_COMPLETED_REDIS_SWEEP_INTERVAL_MS = Number(process.env.LUDO_COMPLETED_REDIS_SWEEP_INTERVAL_MS || 10000);
+const LUDO_COMPLETED_REDIS_SWEEP_COUNT = Number(process.env.LUDO_COMPLETED_REDIS_SWEEP_COUNT || 500);
 
 async function scanKeysByPattern(redisClient, pattern, count = 100) {
   const scanCount = Math.max(1, Number(count) || 100);
@@ -116,6 +119,12 @@ async function processLudoUserTimers() {
   const redis = await getRedisClient();
   if (!redis) return;
 
+  const nowMs = Date.now();
+  if (nowMs - lastCompletedSweepAt >= Math.max(1000, LUDO_COMPLETED_REDIS_SWEEP_INTERVAL_MS)) {
+    lastCompletedSweepAt = nowMs;
+    await sweepCompletedRedisMatches(redis).catch(() => {});
+  }
+
   const scanCount = Math.max(1, LUDO_TIMER_MATCH_SCAN_COUNT);
   const serverId = String(config.serverId || '1');
   const matchKeys = await scanKeysByPattern(redis, `match_server:*:${serverId}`, scanCount);
@@ -129,7 +138,6 @@ async function processLudoUserTimers() {
       .filter(Boolean)
       .slice(0, scanCount)
     : [];
-  const nowMs = Date.now();
   if (nowMs - lastHeartbeatLogAt >= HEARTBEAT_LOG_INTERVAL_MS) {
     lastHeartbeatLogAt = nowMs;
     console.log(`[Cron][LudoTimer] heartbeat server_id=${serverId} match_keys=${activeGames.length}`);
@@ -161,6 +169,7 @@ async function processLudoUserTimers() {
       }
 
       if (isMatchCompleted(parsedMatch)) {
+        await completeLudoGame(gameId, parsedMatch, redis);
         return;
       }
 
@@ -177,10 +186,6 @@ async function processLudoUserTimers() {
       }
       if (user2SocketId) {
         usersToUpdate.push({ userId: user2Id, socketId: user2SocketId });
-      }
-
-      if (usersToUpdate.length === 0) {
-        return;
       }
 
       const user1Time = parsedMatch.user1_time;
@@ -795,10 +800,35 @@ async function completeLudoGame(gameId, matchData, redisInstance) {
   // Always update match_pairs to 'completed' when game ends
   if (gameId != null) {
     try {
-      const { updateMatchPairToCompleted } = require('../../services/common/baseWindeclearService');
       const { updateMatchPairStatus } = require('../../services/ludo/gameService');
-      await updateMatchPairToCompleted(gameId, updateMatchPairStatus);
+      await updateMatchPairStatus(gameId, GAME_STATUS.COMPLETED);
     } catch (err) {
+    }
+  }
+}
+
+async function sweepCompletedRedisMatches(redis) {
+  const scanCount = Math.max(1, LUDO_COMPLETED_REDIS_SWEEP_COUNT);
+  const keys = await scanKeysByPattern(redis, 'match:*', scanCount);
+  if (!Array.isArray(keys) || keys.length === 0) return;
+
+  const gameIds = keys
+    .map((k) => String(k || ''))
+    .filter((k) => k.startsWith('match:'))
+    .map((k) => k.slice('match:'.length))
+    .filter(Boolean)
+    .slice(0, scanCount);
+
+  for (const gameId of gameIds) {
+    try {
+      const raw = await redis.get(REDIS_KEYS.MATCH(gameId));
+      if (!raw) continue;
+      const parsed = safeParseRedisData(raw);
+      if (!parsed) continue;
+      if (isMatchCompleted(parsed)) {
+        await completeLudoGame(gameId, parsed, redis);
+      }
+    } catch (_) {
     }
   }
 }
