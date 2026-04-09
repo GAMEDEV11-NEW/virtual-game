@@ -355,7 +355,11 @@ async function getAndValidateGameMatch(gameId, userId, socket, config) {
       return null;
     }
     
-    if (match.user1_id !== userId && match.user2_id !== userId) {
+    const normalizedUserId = String(userId || '').trim();
+    const matchUser1Id = String(match.user1_id || '').trim();
+    const matchUser2Id = String(match.user2_id || '').trim();
+
+    if (matchUser1Id !== normalizedUserId && matchUser2Id !== normalizedUserId) {
       emitError(socket, {
         code: 'invalid_user',
         type: 'data',

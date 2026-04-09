@@ -5,8 +5,11 @@ const { findActiveOpponentSocketId } = require('../../helpers/common/gameHelpers
 const {
   getAndValidateGameMatch: baseGetAndValidateGameMatch,
   updateGameStateInRedis: baseUpdateGameStateInRedis,
+  updateDatabaseRecords: baseUpdateDatabaseRecords,
   notifyOpponent: baseNotifyOpponent,
-  sendQuitResponse: baseSendQuitResponse
+  sendQuitResponse: baseSendQuitResponse,
+  stopTimers: baseStopTimers,
+  cleanupRedisKeys: baseCleanupRedisKeys
 } = require('../common/baseHandlers');
 const {
   GAME_STATUS,
@@ -20,6 +23,22 @@ const QUIT_GAME_EVENTS = {
   RESPONSE: 'quit:game:response',
   NOTIFICATION: 'game:quit:notification'
 };
+
+function stringifyProfile(profile = {}) {
+  const username = String(profile?.username || '').trim();
+  const image = String(profile?.image || '').trim();
+  const email = String(profile?.email || '').trim();
+  if (!username && !image && !email) return '';
+  return JSON.stringify({ username, image, email });
+}
+
+function markQuitEmitGuard(targetSocket, gameId) {
+  if (!targetSocket || !gameId) return;
+  if (!targetSocket._ludoQuitEmitGuard || !(targetSocket._ludoQuitEmitGuard instanceof Set)) {
+    targetSocket._ludoQuitEmitGuard = new Set();
+  }
+  targetSocket._ludoQuitEmitGuard.add(String(gameId));
+}
 
 const gameConfig = {
   getMatchKey: (gameId) => REDIS_KEYS.MATCH(gameId),
@@ -37,7 +56,13 @@ const gameConfig = {
     quit_at: gameData.quitAt,
     completed_at: gameData.quitAt,
     game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
-    message: 'You won! Your opponent has quit the game'
+    message: 'You won! Your opponent has quit the game',
+    user_full_name: gameData.opponentUsername || '',
+    user_profile_data: stringifyProfile(gameData.opponentProfile || {}),
+    opponent_full_name: gameData.userUsername || '',
+    opponent_profile_data: stringifyProfile(gameData.userProfile || {}),
+    user_username: gameData.opponentUsername || '',
+    opponent_username: gameData.userUsername || ''
   }),
   formatResponse: (gameData) => ({
     status: 'game_lost',
@@ -48,7 +73,13 @@ const gameConfig = {
     quit_at: gameData.quitAt,
     completed_at: gameData.quitAt,
     game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
-    message: 'Game quit successfully. Your opponent won the game.'
+    message: 'Game quit successfully. Your opponent won the game.',
+    user_full_name: gameData.userUsername || '',
+    user_profile_data: stringifyProfile(gameData.userProfile || {}),
+    opponent_full_name: gameData.opponentUsername || '',
+    opponent_profile_data: stringifyProfile(gameData.opponentProfile || {}),
+    user_username: gameData.userUsername || '',
+    opponent_username: gameData.opponentUsername || ''
   }),
   cleanupRedisMatchData: async (gameId) => {
     const { cleanupRedisMatchData } = require('../../services/ludo/windeclearService');
@@ -75,6 +106,18 @@ function sendQuitResponse(socket, gameData) {
   baseSendQuitResponse(socket, gameData, gameConfig);
 }
 
+async function updateDatabaseRecords(gameId, opponentId, userId, contestId, match, socket) {
+  return baseUpdateDatabaseRecords(gameId, opponentId, userId, contestId, match, socket, gameConfig);
+}
+
+function stopTimers(io, socket, opponentSocketId, gameId, opponentId, quitAt) {
+  baseStopTimers(io, socket, opponentSocketId, gameId, opponentId, quitAt, gameConfig);
+}
+
+async function cleanupRedisKeys(gameId) {
+  return baseCleanupRedisKeys(gameId, gameConfig);
+}
+
 // ============================================================================
 // Register quit handler
 // ============================================================================
@@ -96,8 +139,17 @@ async function registerQuitGameHandler(io, socket) {
       const match = await getAndValidateGameMatch(game_id, user_id, socket);
       if (!match) return;
 
-      const opponentId = match.user1_id === user_id ? match.user2_id : match.user1_id;
+      const normalizedUserId = String(user_id || '').trim();
+      const matchUser1Id = String(match.user1_id || '').trim();
+      const opponentId = matchUser1Id === normalizedUserId ? match.user2_id : match.user1_id;
+      const normalizedOpponentId = String(opponentId || '').trim();
       const opponentSocketId = await findActiveOpponentSocketId(io, game_id, user_id, 'ludo');
+      const safeOpponentSocketId = (
+        opponentSocketId &&
+        opponentSocketId !== socket.id &&
+        normalizedOpponentId &&
+        normalizedOpponentId !== normalizedUserId
+      ) ? opponentSocketId : null;
 
       const updateSuccess = await updateGameStateInRedis(match, user_id, opponentId, game_id, socket);
       if (!updateSuccess) {
@@ -117,10 +169,31 @@ async function registerQuitGameHandler(io, socket) {
         contestId: contest_id,
         userId: user_id,
         opponentId,
-        quitAt: new Date().toISOString()
+        quitAt: new Date().toISOString(),
+        userUsername: String(socket?.user?.username || socket?.user?.contest_join_data?.username || '').trim(),
+        userProfile: {
+          username: String(socket?.user?.username || socket?.user?.contest_join_data?.username || '').trim(),
+          image: String(socket?.user?.user_image || socket?.user?.contest_join_data?.user_image || '').trim(),
+          email: String(socket?.user?.user_email || socket?.user?.contest_join_data?.user_email || '').trim()
+        },
+        opponentUsername: '',
+        opponentProfile: {}
       };
+      if (safeOpponentSocketId) {
+        const opponentSocket = io.sockets.sockets.get(safeOpponentSocketId);
+        gameData.opponentUsername = String(opponentSocket?.user?.username || opponentSocket?.user?.contest_join_data?.username || '').trim();
+        gameData.opponentProfile = {
+          username: gameData.opponentUsername,
+          image: String(opponentSocket?.user?.user_image || opponentSocket?.user?.contest_join_data?.user_image || '').trim(),
+          email: String(opponentSocket?.user?.user_email || opponentSocket?.user?.contest_join_data?.user_email || '').trim()
+        };
+      }
 
-      notifyOpponent(io, opponentSocketId, gameData);
+      await updateDatabaseRecords(game_id, opponentId, user_id, contest_id, match, socket);
+      stopTimers(io, socket, safeOpponentSocketId, game_id, opponentId, gameData.quitAt);
+      await cleanupRedisKeys(game_id);
+
+      notifyOpponent(io, safeOpponentSocketId, gameData);
       sendQuitResponse(socket, gameData);
       try {
         const winnerPayload = {
@@ -130,7 +203,11 @@ async function registerQuitGameHandler(io, socket) {
           loser_id: user_id,
           completed_at: gameData.quitAt,
           game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          winner_username: gameData.opponentUsername || '',
+          loser_username: gameData.userUsername || '',
+          winner_profile_data: stringifyProfile(gameData.opponentProfile || {}),
+          loser_profile_data: stringifyProfile(gameData.userProfile || {})
         };
         const loserPayload = {
           status: 'info',
@@ -139,17 +216,25 @@ async function registerQuitGameHandler(io, socket) {
           loser_id: user_id,
           completed_at: gameData.quitAt,
           game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          winner_username: gameData.opponentUsername || '',
+          loser_username: gameData.userUsername || '',
+          winner_profile_data: stringifyProfile(gameData.opponentProfile || {}),
+          loser_profile_data: stringifyProfile(gameData.userProfile || {})
         };
 
-        if (opponentSocketId) {
-          io.to(opponentSocketId).emit('game:won', winnerPayload);
+        if (safeOpponentSocketId) {
+          const opponentSocket = io.sockets.sockets.get(safeOpponentSocketId);
+          markQuitEmitGuard(opponentSocket, game_id);
+          io.to(safeOpponentSocketId).emit('game:won', winnerPayload);
         }
 
+        markQuitEmitGuard(socket, game_id);
         socket.emit('game:lost', loserPayload);
       } catch (_) {
       }
     } catch (error) {
+      void error;
       emitError(socket, {
         code: 'internal_error',
         type: 'system',

@@ -19,6 +19,124 @@ const { registerDisconnectHandler: registerWSORTDisconnect } = require('../handl
 
 // Common handlers
 const { registerHeartbeatHandler } = require('../handlers/common/heartbeatHandler');
+const mysqlClient = require('../services/mysql/client');
+
+const LUDO_FINISH_WATCH_INTERVAL_MS = Math.max(1000, Number(process.env.LUDO_FINISH_WATCH_INTERVAL_MS || 3000));
+
+function normalize(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function isCompletedStatus(status) {
+  return normalize(status).toLowerCase() === 'completed';
+}
+
+async function fetchLatestLudoFinishRow(socket) {
+  const userId = normalize(socket?.user?.user_id || socket?.handshake?.auth?.user_id || socket?.handshake?.query?.user_id);
+  const contestId = normalize(socket?.user?.contest_id || socket?.handshake?.auth?.contest_id || socket?.handshake?.query?.contest_id);
+  const lId = normalize(
+    socket?.user?.l_id ||
+    socket?.user?.contest_join_data?.l_id ||
+    socket?.contestJoinData?.l_id ||
+    socket?.handshake?.auth?.l_id ||
+    socket?.handshake?.query?.l_id
+  );
+  if (!userId) return null;
+
+  const selectSql = `
+    SELECT match_id, status, winner_user_id, user_id, opponent_user_id, contest_id, ended_at, updated_at
+    FROM ludo_game
+    WHERE is_deleted = 0 AND l_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1`;
+  if (lId) {
+    const [rows] = await mysqlClient.query(selectSql, [lId]);
+    if (Array.isArray(rows) && rows[0]) {
+      return rows[0];
+    }
+  }
+
+  if (contestId) {
+    const [rows] = await mysqlClient.query(
+      `SELECT match_id, status, winner_user_id, user_id, opponent_user_id, contest_id, ended_at, updated_at
+       FROM ludo_game
+       WHERE is_deleted = 0 AND user_id = ? AND contest_id = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [userId, contestId]
+    );
+    return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  }
+
+  const [rows] = await mysqlClient.query(
+    `SELECT match_id, status, winner_user_id, user_id, opponent_user_id, contest_id, ended_at, updated_at
+     FROM ludo_game
+     WHERE is_deleted = 0 AND user_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [userId]
+  );
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+async function emitLudoFinishIfNeeded(socket) {
+  if (!socket?.connected) return;
+  const row = await fetchLatestLudoFinishRow(socket);
+  if (!row || !isCompletedStatus(row.status)) return;
+
+  const userId = normalize(socket?.user?.user_id || socket?.handshake?.auth?.user_id || socket?.handshake?.query?.user_id);
+  const winnerId = normalize(row.winner_user_id);
+  if (!userId || !winnerId) return;
+
+  const matchId = normalize(row.match_id);
+  if (socket._ludoQuitEmitGuard instanceof Set && socket._ludoQuitEmitGuard.has(matchId)) {
+    return;
+  }
+  const version = normalize(row.updated_at || row.ended_at || '');
+  const dedupeKey = `${matchId}:${version}:${winnerId}`;
+  if (socket._ludoFinishLastDedupeKey === dedupeKey) return;
+  socket._ludoFinishLastDedupeKey = dedupeKey;
+
+  const isWinner = userId === winnerId;
+  const selfUsername = normalize(
+    socket?.user?.username ||
+    socket?.user?.contest_join_data?.username ||
+    socket?.contestJoinData?.username ||
+    ''
+  );
+  const payload = {
+    status: isWinner ? 'success' : 'info',
+    game_id: matchId,
+    winner_id: winnerId,
+    loser_id: isWinner ? normalize(row.opponent_user_id) : userId,
+    completed_at: normalize(row.ended_at || row.updated_at || new Date().toISOString()),
+    game_end_reason: 'game_completed',
+    timestamp: new Date().toISOString(),
+    user_username: selfUsername
+  };
+  const eventName = isWinner ? 'game:won' : 'game:lost';
+  socket.emit(eventName, payload);
+}
+
+function startLudoFinishObserver(socket) {
+  if (socket._ludoFinishWatcherInterval) {
+    clearInterval(socket._ludoFinishWatcherInterval);
+    socket._ludoFinishWatcherInterval = null;
+  }
+
+  const runCheck = async () => {
+    try {
+      await emitLudoFinishIfNeeded(socket);
+    } catch (_) {
+    }
+  };
+
+  runCheck().catch(() => {});
+  socket._ludoFinishWatcherInterval = setInterval(() => {
+    runCheck().catch(() => {});
+  }, LUDO_FINISH_WATCH_INTERVAL_MS);
+}
 
 module.exports = function registerSocketHandlers(io) {
   io.on('connection', (socket) => {
@@ -64,6 +182,10 @@ module.exports = function registerSocketHandlers(io) {
     registerSLDisconnect(io, socket);
     registerTTTDisconnect(io, socket);
     registerWSORTDisconnect(io, socket);
+
+    // 1) Immediate connect/reconnect finish check.
+    // 2) Continuous observer while connected.
+    startLudoFinishObserver(socket);
 
     socket.on('disconnect', () => {
       // domain-specific cleanup handled in disconnect handler

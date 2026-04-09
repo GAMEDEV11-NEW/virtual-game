@@ -28,6 +28,46 @@ function sameId(a, b) {
   return na === nb;
 }
 
+function safeParseObject(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getProfileForUser(match, targetUserId, fallback = {}) {
+  const target = normalizeIdValue(targetUserId);
+  if (!target || !match) {
+    return {
+      username: normalizeIdValue(fallback.username || ''),
+      image: normalizeIdValue(fallback.image || ''),
+      email: normalizeIdValue(fallback.email || '')
+    };
+  }
+  const isUser1 = sameId(target, match.user1_id);
+  const profileRaw = isUser1 ? match.user1_profile : match.user2_profile;
+  const profile = safeParseObject(profileRaw) || (profileRaw && typeof profileRaw === 'object' ? profileRaw : {});
+  const usernameFallback = isUser1 ? match.user1_username : match.user2_username;
+  return {
+    username: normalizeIdValue(profile?.username || usernameFallback || fallback.username || ''),
+    image: normalizeIdValue(profile?.image || fallback.image || ''),
+    email: normalizeIdValue(profile?.email || fallback.email || '')
+  };
+}
+
+function stringifyProfile(profile = {}) {
+  const username = normalizeIdValue(profile.username || '');
+  const image = normalizeIdValue(profile.image || '');
+  const email = normalizeIdValue(profile.email || '');
+  if (!username && !image && !email) return '';
+  return JSON.stringify({ username, image, email });
+}
+
 // ============================================================================
 // logDiceHandlerError
 // ============================================================================
@@ -1070,9 +1110,27 @@ async function scoreDiceRollAndUpdateResponse(response, match, user_id) {
 // ============================================================================
 async function notifyPlayers(socket, io, game_id, match, response, user_id, responseGuarantee = null) {
   try {
+    const actorId = normalizeIdValue(user_id);
+    const opponentId = sameId(actorId, match.user1_id) ? normalizeIdValue(match.user2_id) : normalizeIdValue(match.user1_id);
+    const actorProfile = getProfileForUser(match, actorId, {
+      username: socket?.user?.username || socket?.user?.contest_join_data?.username || '',
+      image: socket?.user?.user_image || socket?.user?.contest_join_data?.user_image || '',
+      email: socket?.user?.user_email || socket?.user?.contest_join_data?.user_email || ''
+    });
+    const opponentProfile = getProfileForUser(match, opponentId);
+
     response.turn = match.turn;
     response.user1_score = parseInt(match.user1_score) || 0;
     response.user2_score = parseInt(match.user2_score) || 0;
+    response.player_user_id = actorId;
+    response.opponent_user_id = opponentId;
+    response.player_username = actorProfile.username;
+    response.opponent_username = opponentProfile.username;
+    response.player_profile_data = stringifyProfile(actorProfile);
+    response.opponent_profile_data = stringifyProfile(opponentProfile);
+    response.user_full_name = actorProfile.username;
+    response.user_profile_data = stringifyProfile(actorProfile);
+    response.opponent_full_name = opponentProfile.username;
 
     // Ensure gets_another_turn is set based on turn
     if (response.dice_number === 6 && sameId(match.turn, user_id) && !response.gets_another_turn) {

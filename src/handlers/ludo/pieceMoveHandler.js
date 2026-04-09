@@ -35,6 +35,46 @@ function sameId(a, b) {
   return na === nb;
 }
 
+function safeParseObject(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function stringifyProfile(profile = {}) {
+  const username = normalizeIdValue(profile.username || '');
+  const image = normalizeIdValue(profile.image || '');
+  const email = normalizeIdValue(profile.email || '');
+  if (!username && !image && !email) return '';
+  return JSON.stringify({ username, image, email });
+}
+
+function getProfileForUser(match, targetUserId, fallback = {}) {
+  const target = normalizeIdValue(targetUserId);
+  if (!target || !match) {
+    return {
+      username: normalizeIdValue(fallback.username || ''),
+      image: normalizeIdValue(fallback.image || ''),
+      email: normalizeIdValue(fallback.email || '')
+    };
+  }
+  const isUser1 = sameId(target, match.user1_id);
+  const profileRaw = isUser1 ? match.user1_profile : match.user2_profile;
+  const profile = safeParseObject(profileRaw) || (profileRaw && typeof profileRaw === 'object' ? profileRaw : {});
+  const usernameFallback = isUser1 ? match.user1_username : match.user2_username;
+  return {
+    username: normalizeIdValue(profile?.username || usernameFallback || fallback.username || ''),
+    image: normalizeIdValue(profile?.image || fallback.image || ''),
+    email: normalizeIdValue(profile?.email || fallback.email || '')
+  };
+}
+
 // ============================================================================
 // PlayerContext
 // ============================================================================
@@ -352,6 +392,16 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
     await saveMatchState(redisClient, gameID, mergedMatch);
     
     const matchForNotify = mergedMatch;
+    const actorId = normalizeIdValue(userID);
+    const opponentId = sameId(actorId, matchForNotify.user1_id)
+      ? normalizeIdValue(matchForNotify.user2_id)
+      : normalizeIdValue(matchForNotify.user1_id);
+    const actorProfile = getProfileForUser(matchForNotify, actorId, {
+      username: socket?.user?.username || socket?.user?.contest_join_data?.username || '',
+      image: socket?.user?.user_image || socket?.user?.contest_join_data?.user_image || '',
+      email: socket?.user?.user_email || socket?.user?.contest_join_data?.user_email || ''
+    });
+    const opponentProfile = getProfileForUser(matchForNotify, opponentId);
     const normalizedMove = {
       ...moveResponse,
       kill_details: (moveResponse && moveResponse.kill_details) ? moveResponse.kill_details : [],
@@ -364,6 +414,15 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
       user2_score: parseInt(matchForNotify.user2_score) || 0,
       user1_pieces: matchForNotify.user1_pieces || [],
       user2_pieces: matchForNotify.user2_pieces || [],
+      player_user_id: actorId,
+      opponent_user_id: opponentId,
+      player_username: actorProfile.username,
+      opponent_username: opponentProfile.username,
+      player_profile_data: stringifyProfile(actorProfile),
+      opponent_profile_data: stringifyProfile(opponentProfile),
+      user_full_name: actorProfile.username,
+      user_profile_data: stringifyProfile(actorProfile),
+      opponent_full_name: opponentProfile.username,
     };
     
     // Use response guarantee if provided, otherwise direct emit
@@ -387,6 +446,15 @@ async function updateGameAndNotify(socket, io, gameID, match, moveResponse, user
         user2_score: parseInt(matchForNotify.user2_score) || 0,
         user1_pieces: matchForNotify.user1_pieces || [],
         user2_pieces: matchForNotify.user2_pieces || [],
+        player_user_id: actorId,
+        opponent_user_id: opponentId,
+        player_username: actorProfile.username,
+        opponent_username: opponentProfile.username,
+        player_profile_data: stringifyProfile(actorProfile),
+        opponent_profile_data: stringifyProfile(opponentProfile),
+        user_full_name: actorProfile.username,
+        user_profile_data: stringifyProfile(actorProfile),
+        opponent_full_name: opponentProfile.username,
       },
       broadcastPieceMoveToOpponent
     );
@@ -942,6 +1010,33 @@ function registerPieceMoveHandler(io, socket) {
         }
         
         if (gameWon && winnerInfo) {
+          const winnerUserId = String(user.user_id || '');
+          const loserUserId = String((sameId(user.user_id, finalMatch.user1_id)) ? finalMatch.user2_id : finalMatch.user1_id || '');
+          const winnerIsUser1 = sameId(winnerUserId, finalMatch.user1_id);
+          const winnerProfileRaw = winnerIsUser1 ? finalMatch.user1_profile : finalMatch.user2_profile;
+          const loserProfileRaw = winnerIsUser1 ? finalMatch.user2_profile : finalMatch.user1_profile;
+          const winnerProfileObj = (winnerProfileRaw && typeof winnerProfileRaw === 'object') ? winnerProfileRaw : {};
+          const loserProfileObj = (loserProfileRaw && typeof loserProfileRaw === 'object') ? loserProfileRaw : {};
+          const winnerUsername = String(
+            winnerProfileObj.username || (winnerIsUser1 ? finalMatch.user1_username : finalMatch.user2_username) || socket?.user?.username || ''
+          ).trim();
+          const loserUsername = String(
+            loserProfileObj.username || (winnerIsUser1 ? finalMatch.user2_username : finalMatch.user1_username) || ''
+          ).trim();
+          const winnerProfileData = (winnerUsername || winnerProfileObj.image || winnerProfileObj.email)
+            ? JSON.stringify({
+              username: winnerUsername,
+              image: String(winnerProfileObj.image || '').trim(),
+              email: String(winnerProfileObj.email || '').trim()
+            })
+            : '';
+          const loserProfileData = (loserUsername || loserProfileObj.image || loserProfileObj.email)
+            ? JSON.stringify({
+              username: loserUsername,
+              image: String(loserProfileObj.image || '').trim(),
+              email: String(loserProfileObj.email || '').trim()
+            })
+            : '';
           const finishedPayloadBase = {
             status: 'game_completed',
             game_id: validatedMoveData.game_id,
@@ -956,6 +1051,11 @@ function registerPieceMoveHandler(io, socket) {
               message: '🎉 Congratulations! You have won the game!',
               game_id: validatedMoveData.game_id,
               winner_id: user.user_id,
+              loser_id: loserUserId,
+              winner_username: winnerUsername,
+              loser_username: loserUsername,
+              winner_profile_data: winnerProfileData,
+              loser_profile_data: loserProfileData,
               completed_at: winnerInfo.timestamp,
               game_end_reason: 'all_pieces_home',
               timestamp: new Date().toISOString()
@@ -967,7 +1067,7 @@ function registerPieceMoveHandler(io, socket) {
             });
           }
           
-          const opponentUserId = (sameId(user.user_id, finalMatch.user1_id)) ? finalMatch.user2_id : finalMatch.user1_id;
+          const opponentUserId = loserUserId;
           
         let opponentSocketId = null;
         try {
@@ -987,6 +1087,10 @@ function registerPieceMoveHandler(io, socket) {
                 game_id: validatedMoveData.game_id,
                 winner_id: user.user_id,
                 loser_id: opponentUserId,
+                winner_username: winnerUsername,
+                loser_username: loserUsername,
+                winner_profile_data: winnerProfileData,
+                loser_profile_data: loserProfileData,
                 completed_at: winnerInfo.timestamp,
                 game_end_reason: 'all_pieces_home',
                 timestamp: new Date().toISOString()
@@ -1007,6 +1111,10 @@ function registerPieceMoveHandler(io, socket) {
                 game_id: validatedMoveData.game_id,
                 winner_id: user.user_id,
                 loser_id: opponentUserId,
+                winner_username: winnerUsername,
+                loser_username: loserUsername,
+                winner_profile_data: winnerProfileData,
+                loser_profile_data: loserProfileData,
                 completed_at: winnerInfo.timestamp,
                 game_end_reason: 'all_pieces_home',
                 timestamp: new Date().toISOString()

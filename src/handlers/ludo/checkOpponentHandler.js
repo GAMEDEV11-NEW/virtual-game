@@ -86,6 +86,60 @@ function normalizePieceForResponse(piece, gameId, userId, index) {
   };
 }
 
+function safeParseObject(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function resolveProfileFromSnapshot(snapshot = null) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return {
+      username: '',
+      image: '',
+      email: ''
+    };
+  }
+  const extraData = safeParseObject(snapshot.extra_data) || {};
+  const user = (extraData.user && typeof extraData.user === 'object') ? extraData.user : {};
+  return {
+    username: normalizeId(snapshot.username || user.username || ''),
+    image: normalizeId(snapshot.user_image || user.image || ''),
+    email: normalizeId(snapshot.user_email || user.email || '')
+  };
+}
+
+function resolveProfileFromMatchForUser(match = null, userId = '') {
+  if (!match || !userId) return { username: '', image: '', email: '' };
+  const normalizedUserId = normalizeId(userId);
+  const isUser1 = sameNormalizedId(normalizedUserId, match.user1_id);
+  const isUser2 = sameNormalizedId(normalizedUserId, match.user2_id);
+  if (!isUser1 && !isUser2) return { username: '', image: '', email: '' };
+
+  const profileRaw = isUser1 ? match.user1_profile : match.user2_profile;
+  const profile = safeParseObject(profileRaw) || (profileRaw && typeof profileRaw === 'object' ? profileRaw : {});
+  const usernameFallback = isUser1 ? match.user1_username : match.user2_username;
+  return {
+    username: normalizeId(profile?.username || usernameFallback || ''),
+    image: normalizeId(profile?.image || ''),
+    email: normalizeId(profile?.email || '')
+  };
+}
+
+function buildProfileDataString(profile = {}) {
+  const username = normalizeId(profile.username || '');
+  const image = normalizeId(profile.image || '');
+  const email = normalizeId(profile.email || '');
+  if (!username && !image && !email) return '';
+  return JSON.stringify({ username, image, email });
+}
+
 function normalizePiecesForResponse(pieces, gameId, userId) {
   const arr = Array.isArray(pieces) ? pieces : [];
   const normalized = arr.map((piece, index) => normalizePieceForResponse(piece, gameId, userId, index));
@@ -258,11 +312,13 @@ async function ensureLudoPieces(gameID, userID, pieces) {
 // ============================================================================
 // Emit success response with game data
 // ============================================================================
-function emitOpponentResponseWithGameData(socket, entry, gameData) {
+function emitOpponentResponseWithGameData(socket, entry, gameData, profiles = {}) {
   const resolvedTurnId = normalizeId(entry.TurnID) || normalizeId(gameData.matchTurnId) || null;
   const gameId = normalizeId(entry.MatchPairID);
   const userId = normalizeId(entry.UserID);
   const opponentUserId = normalizeId(entry.OpponentUserID);
+  const selfProfile = profiles.self || {};
+  const opponentProfile = profiles.opponent || {};
   const response = {
     status: 'success',
     user_id: userId,
@@ -277,10 +333,12 @@ function emitOpponentResponseWithGameData(socket, entry, gameData) {
     pieces_status: 'active',
     turn_id: resolvedTurnId,
     start_time: toIsoDate(entry.JoinedAt),
-    user_full_name: '',
-    user_profile_data: '',
-    opponent_full_name: '',
-    opponent_profile_data: ''
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: buildProfileDataString(selfProfile),
+    opponent_full_name: normalizeId(opponentProfile.username || ''),
+    opponent_profile_data: buildProfileDataString(opponentProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    opponent_username: normalizeId(opponentProfile.username || '')
   };
 
   socket.emit('opponent:response', response);
@@ -289,8 +347,10 @@ function emitOpponentResponseWithGameData(socket, entry, gameData) {
 // ============================================================================
 // Emit pending response
 // ============================================================================
-function emitPendingOpponentResponse(socket, entry = {}, message = 'Waiting for opponent match...') {
-  socket.emit('opponent:response', {
+function emitPendingOpponentResponse(socket, entry = {}, message = 'Waiting for opponent match...', profiles = {}) {
+  const selfProfile = profiles.self || {};
+  const opponentProfile = profiles.opponent || {};
+  const pendingResponse = {
     status: 'pending',
     user_id: entry.UserID ? String(entry.UserID) : '',
     opponent_user_id: '',
@@ -301,11 +361,20 @@ function emitPendingOpponentResponse(socket, entry = {}, message = 'Waiting for 
     opponent_pieces: [],
     pieces_status: 'pending',
     turn_id: entry.TurnID ?? null,
-    message
-  });
+    message,
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: buildProfileDataString(selfProfile),
+    opponent_full_name: normalizeId(opponentProfile.username || ''),
+    opponent_profile_data: buildProfileDataString(opponentProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    opponent_username: normalizeId(opponentProfile.username || '')
+  };
+  socket.emit('opponent:response', pendingResponse);
 }
 
-function emitCompletedOpponentResponse(socket, payload = {}) {
+function emitCompletedOpponentResponse(socket, payload = {}, profiles = {}) {
+  const selfProfile = profiles.self || {};
+  const opponentProfile = profiles.opponent || {};
   socket.emit('opponent:response', {
     status: 'completed',
     user_id: payload.user_id ? String(payload.user_id) : '',
@@ -317,11 +386,19 @@ function emitCompletedOpponentResponse(socket, payload = {}) {
     opponent_pieces: [],
     pieces_status: 'completed',
     turn_id: payload.turn_id ?? null,
-    message: 'Game has been completed'
+    message: 'Game has been completed',
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: buildProfileDataString(selfProfile),
+    opponent_full_name: normalizeId(opponentProfile.username || ''),
+    opponent_profile_data: buildProfileDataString(opponentProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    opponent_username: normalizeId(opponentProfile.username || '')
   });
 }
 
-function emitExpiredAndDisconnect(socket, payload = {}) {
+function emitExpiredAndDisconnect(socket, payload = {}, profiles = {}) {
+  const selfProfile = profiles.self || {};
+  const opponentProfile = profiles.opponent || {};
   socket.emit('opponent:response', {
     status: 'expired',
     user_id: payload.user_id ? String(payload.user_id) : '',
@@ -333,7 +410,13 @@ function emitExpiredAndDisconnect(socket, payload = {}) {
     opponent_pieces: [],
     pieces_status: 'expired',
     turn_id: null,
-    message: 'Entry expired'
+    message: 'Entry expired',
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: buildProfileDataString(selfProfile),
+    opponent_full_name: normalizeId(opponentProfile.username || ''),
+    opponent_profile_data: buildProfileDataString(opponentProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    opponent_username: normalizeId(opponentProfile.username || '')
   });
 
   setTimeout(() => {
@@ -454,6 +537,7 @@ async function handleCheckOpponent(socket, data) {
 
   // Redis-first fast path to reduce DB load for repeated polling.
   const contestSnapshot = await getContestJoinSnapshotFromRedis(user_id, contest_id, l_id);
+  const selfProfileBase = resolveProfileFromSnapshot(contestSnapshot);
   let entry = mapContestJoinSnapshotToEntry(contestSnapshot, { user_id, contest_id, l_id });
 
   if (!(entry && normalizeId(entry.MatchPairID) && hasValidOpponent(entry))) {
@@ -466,6 +550,8 @@ async function handleCheckOpponent(socket, data) {
     const terminalStatus = normalizeId(terminalRow?.status).toLowerCase();
 
     if (terminalRow && isCompletedStatus(terminalStatus)) {
+      const opponentSnapshot = await getContestJoinSnapshotFromRedis(terminalRow.opponent_user_id || '', contest_id, '');
+      const opponentProfile = resolveProfileFromSnapshot(opponentSnapshot);
       emitCompletedOpponentResponse(socket, {
         user_id,
         opponent_user_id: terminalRow.opponent_user_id || '',
@@ -473,6 +559,9 @@ async function handleCheckOpponent(socket, data) {
         joined_at: terminalRow.joined_at ? toIsoDate(terminalRow.joined_at) : null,
         game_id: terminalRow.match_id ? terminalRow.match_id.toString() : '',
         turn_id: terminalRow.turn_id
+      }, {
+        self: selfProfileBase,
+        opponent: opponentProfile
       });
       return;
     }
@@ -481,20 +570,28 @@ async function handleCheckOpponent(socket, data) {
       emitExpiredAndDisconnect(socket, {
         user_id,
         joined_at: terminalRow.joined_at ? toIsoDate(terminalRow.joined_at) : null
+      }, {
+        self: selfProfileBase
       });
       return;
     }
 
-    emitPendingOpponentResponse(socket, { UserID: user_id }, 'Waiting for opponent match...');
+    emitPendingOpponentResponse(socket, { UserID: user_id }, 'Waiting for opponent match...', {
+      self: selfProfileBase
+    });
     return;
   }
 
   entry = await hydrateEntryFromRedisMatch(entry, user_id);
   const entryStatus = normalizeId(entry.status).toLowerCase();
   if (entryStatus === 'expired') {
+    const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID || user_id, contest_id, l_id);
+    const selfProfile = resolveProfileFromSnapshot(selfSnapshot);
     emitExpiredAndDisconnect(socket, {
       user_id: entry.UserID ? String(entry.UserID) : String(user_id || ''),
       joined_at: entry.JoinedAt ? toIsoDate(entry.JoinedAt) : null
+    }, {
+      self: selfProfile
     });
     return;
   }
@@ -504,13 +601,18 @@ async function handleCheckOpponent(socket, data) {
     const waitMessage = entryStatus === 'matched'
       ? 'Matched found, preparing game...'
       : 'Entry data incomplete, waiting for match...';
-    emitPendingOpponentResponse(socket, entry, waitMessage);
+    const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID || user_id, contest_id, l_id);
+    emitPendingOpponentResponse(socket, entry, waitMessage, {
+      self: resolveProfileFromSnapshot(selfSnapshot)
+    });
     return;
   }
 
   const matchPairID = normalizedMatchPairId;
   const isCompleted = await isMatchCompleted(entry, matchPairID);
   if (isCompleted) {
+    const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID, contest_id, l_id);
+    const opponentSnapshot = await getContestJoinSnapshotFromRedis(entry.OpponentUserID, contest_id, '');
     emitCompletedOpponentResponse(socket, {
       user_id: entry.UserID ? String(entry.UserID) : '',
       opponent_user_id: entry.OpponentUserID ? String(entry.OpponentUserID) : '',
@@ -518,22 +620,52 @@ async function handleCheckOpponent(socket, data) {
       joined_at: toIsoDate(entry.JoinedAt),
       game_id: matchPairID,
       turn_id: entry.TurnID
+    }, {
+      self: resolveProfileFromSnapshot(selfSnapshot),
+      opponent: resolveProfileFromSnapshot(opponentSnapshot)
     });
     return;
   }
 
   if (!hasValidOpponent(entry)) {
-    emitPendingOpponentResponse(socket, entry);
+    const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID || user_id, contest_id, l_id);
+    emitPendingOpponentResponse(socket, entry, 'Waiting for opponent match...', {
+      self: resolveProfileFromSnapshot(selfSnapshot)
+    });
     return;
   }
 
   const gameData = await fetchGamePiecesAndDice(matchPairID, entry.UserID, entry.OpponentUserID);
   if (!isLudoStateReadyForSuccess(entry, gameData)) {
-    emitPendingOpponentResponse(socket, entry, 'Matched found, preparing game...');
+    const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID || user_id, contest_id, l_id);
+    const opponentSnapshot = await getContestJoinSnapshotFromRedis(entry.OpponentUserID, contest_id, '');
+    emitPendingOpponentResponse(socket, entry, 'Matched found, preparing game...', {
+      self: resolveProfileFromSnapshot(selfSnapshot),
+      opponent: resolveProfileFromSnapshot(opponentSnapshot)
+    });
     return;
   }
 
-  emitOpponentResponseWithGameData(socket, entry, gameData);
+  const selfSnapshot = await getContestJoinSnapshotFromRedis(entry.UserID, contest_id, l_id);
+  const opponentSnapshot = await getContestJoinSnapshotFromRedis(entry.OpponentUserID, contest_id, '');
+  const match = await getParsedRedisObject(REDIS_KEYS.MATCH(matchPairID));
+  const selfProfile = resolveProfileFromSnapshot(selfSnapshot);
+  const opponentProfile = resolveProfileFromSnapshot(opponentSnapshot);
+  const selfFromMatch = resolveProfileFromMatchForUser(match, entry.UserID);
+  const opponentFromMatch = resolveProfileFromMatchForUser(match, entry.OpponentUserID);
+
+  emitOpponentResponseWithGameData(socket, entry, gameData, {
+    self: {
+      username: selfProfile.username || selfFromMatch.username || '',
+      image: selfProfile.image || selfFromMatch.image || '',
+      email: selfProfile.email || selfFromMatch.email || ''
+    },
+    opponent: {
+      username: opponentProfile.username || opponentFromMatch.username || '',
+      image: opponentProfile.image || opponentFromMatch.image || '',
+      email: opponentProfile.email || opponentFromMatch.email || ''
+    }
+  });
 }
 
 // ============================================================================

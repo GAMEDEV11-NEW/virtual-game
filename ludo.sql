@@ -63,3 +63,67 @@ CREATE TABLE ludo_game (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
+
+create table ludo_game
+(
+    id                  bigint unsigned auto_increment
+        primary key,
+    l_id                varchar(64)                                   not null,
+    opponent_l_id       varchar(64)                                   null,
+    user_id             bigint unsigned                               not null,
+    opponent_user_id    bigint unsigned                               null,
+    contest_id          bigint unsigned                               not null,
+    league_id           bigint unsigned                               not null,
+    opponent_league_id  bigint unsigned                               null,
+    match_id            varchar(64)                                   null,
+    status              varchar(24)      default 'pending'            not null,
+    status_id           tinyint unsigned default '1'                  not null,
+    game_type           varchar(32)                                   null,
+    contest_type        varchar(32)                                   null,
+    turn_id             bigint unsigned                               null,
+    winner_user_id      bigint unsigned                               null,
+    join_day            date                                          not null,
+    server_id           varchar(32)      default '0'                  not null,
+    user_dice_id        varchar(64)                                   null,
+    opponent_dice_id    varchar(64)                                   null,
+    user_piece_1_id     varchar(64)                                   null,
+    user_piece_2_id     varchar(64)                                   null,
+    user_piece_3_id     varchar(64)                                   null,
+    user_piece_4_id     varchar(64)                                   null,
+    opponent_piece_1_id varchar(64)                                   null,
+    opponent_piece_2_id varchar(64)                                   null,
+    opponent_piece_3_id varchar(64)                                   null,
+    opponent_piece_4_id varchar(64)                                   null,
+    s3_key              varchar(512)                                  null,
+    s3_etag             varchar(128)                                  null,
+    move_count          int unsigned     default '0'                  not null,
+    user_chnase         json                                          null,
+    last_move_at        datetime(3)                                   null,
+    lock_version        int unsigned     default '1'                  not null,
+    is_deleted          tinyint(1)       default 0                    not null,
+    joined_at           datetime(3)                                   not null,
+    started_at          datetime(3)                                   null,
+    ended_at            datetime(3)                                   null,
+    created_at          datetime(3)      default CURRENT_TIMESTAMP(3) not null,
+    updated_at          datetime(3)      default CURRENT_TIMESTAMP(3) not null on update CURRENT_TIMESTAMP(3),
+    gameModeId          varchar(128)                                  null,
+    gameHistoryId       varchar(128)                                  null,
+    constraint uk_lid
+        unique (l_id),
+    constraint uk_match_user
+        unique (match_id, user_id)
+)
+    charset = utf8mb4;
+
+create index idx_match_lookup
+    on ludo_game (match_id);
+
+create index idx_opponent_lid
+    on ludo_game (opponent_l_id);
+
+create index idx_pending_scan
+    on ludo_game (status_id, join_day, league_id, server_id, joined_at);
+
+create index idx_user_lookup
+    on ludo_game (user_id, contest_id, status_id);
+

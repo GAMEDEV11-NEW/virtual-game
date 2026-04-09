@@ -35,10 +35,15 @@ function pickContestRecord(contestJoinData, contestId) {
 
 function buildContestSnapshot(userId, contestId, rawRecord, clientLid = '') {
   const record = rawRecord || {};
+  const extraData = (record.extra_data && typeof record.extra_data === 'object') ? record.extra_data : {};
+  const userProfile = (extraData.user && typeof extraData.user === 'object') ? extraData.user : {};
   const resolvedContestId = record.contest_id || record.league_id || contestId || '';
   const resolvedLid = normalizeString(clientLid) || record.l_id || record.id || '';
   return {
     user_id: String(userId),
+    username: normalizeString(record.username || userProfile.username || ''),
+    user_image: normalizeString(record.user_image || userProfile.image || ''),
+    user_email: normalizeString(record.user_email || userProfile.email || ''),
     contest_id: String(resolvedContestId),
     league_id: record.league_id ? String(record.league_id) : '',
     l_id: resolvedLid,
@@ -69,6 +74,21 @@ function buildContestJoinRedisKey(snapshot) {
 function normalizeString(value) {
   if (value === null || value === undefined) return '';
   return String(value).trim();
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const normalized = normalizeString(value);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function resolveMatchPairId(result = {}, session = {}) {
+  return firstNonEmpty(
+    result.matchPairId,
+    session.matchPairId
+  );
 }
 
 function generateLid(userId, leagueId) {
@@ -135,14 +155,8 @@ async function persistPendingJoinBackground(snapshot) {
       serverId
     ]);
   } catch (err) {
-    console.error('[SocketAuth] pending upsert failed:', {
-      message: err?.message || String(err),
-      userId,
-      contestId,
-      leagueId,
-      lId,
-      joinedAtMysql
-    });
+    void err;
+    void joinedAtMysql;
   }
 }
 
@@ -180,14 +194,15 @@ async function storeContestJoinSnapshot(userId, contestId, contestJoinData, clie
   const snapshot = buildContestSnapshot(userId, contestId, picked, clientLid);
   const key = buildContestJoinRedisKey(snapshot);
   await redis.set(key, snapshot, ttl);
+  void key;
   return snapshot;
 }
 
 function buildNormalizedValidateUserPayload(apiData, fallback = {}) {
   if (!apiData || typeof apiData !== 'object') return null;
 
-  // New validate-user response contract:
-  // { status: 1, result: { ... } }
+  // validate-user response contract:
+  // { status: 1, result: { ..., session: {}, lobby: {}, game: {}, gameMode: {} } }
   if (Object.prototype.hasOwnProperty.call(apiData, 'status') && apiData.result && typeof apiData.result === 'object') {
     const statusCode = Number(apiData.status);
     const result = apiData.result || {};
@@ -210,37 +225,56 @@ function buildNormalizedValidateUserPayload(apiData, fallback = {}) {
     const lobby = result.lobby && typeof result.lobby === 'object' ? result.lobby : {};
     const game = result.game && typeof result.game === 'object' ? result.game : {};
     const gameMode = result.gameMode && typeof result.gameMode === 'object' ? result.gameMode : {};
+    const user = result.user && typeof result.user === 'object' ? result.user : {};
+    const resolvedUsername = normalizeString(user.username || '');
 
-    const gameId = normalizeString(result.gameId || game.id);
+    const gameId = firstNonEmpty(result.gameId, game.id, lobby.gameId);
     const contestId = normalizeString(session.lobbyId || lobby.id || fallback.contestId || '');
     const sessionId = normalizeString(session.sessionId || fallback.lId || '');
     const joinedAt = normalizeString(apiData.time_stamp || new Date().toISOString());
+    const resolvedGameModeId = firstNonEmpty(
+      result.gameModeId,
+      lobby.gameModeId,
+      gameMode.id
+    );
+    const resolvedGameHistoryId = firstNonEmpty(
+      result.gameHistoryId,
+      session.gameHistoryId,
+      session.gameSessionDbId
+    );
+    const resolvedMatchPairId = resolveMatchPairId(result, session);
+    const isLudo = gameId === '1';
 
     return {
       user_id: normalizeString(result.userId || fallback.userId || ''),
+      username: resolvedUsername,
+      user_image: normalizeString(user.image || ''),
+      user_email: normalizeString(user.email || ''),
       contest_id: contestId,
       league_id: contestId,
       l_id: sessionId,
-      game_type: gameId === '1' ? 'ludo' : '',
-      contest_type: gameId === '1' ? 'simpleludo' : '',
-      gameModeId: normalizeString(result.gameModeId ?? gameMode.id ?? ''),
-      gameHistoryId: normalizeString(result.gameHistoryId || session.gameHistoryId || ''),
+      game_type: isLudo ? 'ludo' : '',
+      contest_type: isLudo ? 'simpleludo' : '',
+      gameModeId: resolvedGameModeId,
+      gameHistoryId: resolvedGameHistoryId,
       entry_fee: lobby.entryFee ?? null,
       joined_at: joinedAt,
       status: normalizeString(session.status || 'pending') || 'pending',
       status_id: '1',
       opponent_user_id: '',
       opponent_league_id: '',
-      match_pair_id: '',
+      match_pair_id: resolvedMatchPairId || '',
       turn_id: '',
       extra_data: {
         valid: result.valid !== false,
         gameId: gameId || null,
-        gameModeId: result.gameModeId ?? null,
-        gameHistoryId: normalizeString(result.gameHistoryId || session.gameHistoryId || ''),
+        gameModeId: resolvedGameModeId || null,
+        gameHistoryId: resolvedGameHistoryId || '',
+        matchPairId: resolvedMatchPairId || '',
         activationStatus: normalizeString(result.activationStatus || ''),
         blocked: !!result.blocked,
         joinDisabled: !!result.joinDisabled,
+        user,
         lobby,
         game,
         gameMode,
@@ -255,10 +289,7 @@ function buildNormalizedValidateUserPayload(apiData, fallback = {}) {
 function extractContestJoinPayload(apiData, fallback = {}) {
   const normalizedValidatePayload = buildNormalizedValidateUserPayload(apiData, fallback);
   if (normalizedValidatePayload) return normalizedValidatePayload;
-  if (!apiData) return null;
-  if (typeof apiData === 'object' && apiData.contest_join !== undefined) return apiData.contest_join;
-  if (typeof apiData === 'object' && apiData.data !== undefined) return apiData.data;
-  return apiData;
+  return null;
 }
 
 async function fetchContestJoinData(userId, contestId = '', jwtToken = '', lId = '') {
@@ -299,7 +330,11 @@ async function fetchContestJoinData(userId, contestId = '', jwtToken = '', lId =
 
   try {
     const response = await axios(reqConfig);
-    return extractContestJoinPayload(response.data, { userId, contestId, lId });
+    const normalizedPayload = extractContestJoinPayload(response.data, { userId, contestId, lId });
+    if (!normalizedPayload) {
+      throw new Error('Invalid validate-user response format');
+    }
+    return normalizedPayload;
   } catch (err) {
     const responseMessage = err.response?.data?.message || err.response?.data?.error;
     const message = responseMessage || err.message || 'Contest join API request failed';
@@ -364,6 +399,9 @@ async function socketAuthMiddleware(socket, next) {
     
     socket.user = {
       user_id: required.user_id,
+      username: normalizeString(contestJoinSnapshot?.username || ''),
+      user_image: normalizeString(contestJoinSnapshot?.user_image || ''),
+      user_email: normalizeString(contestJoinSnapshot?.user_email || ''),
       contest_id: required.contest_id,
       l_id: required.l_id,
       jwt_token: required.jwt_token,

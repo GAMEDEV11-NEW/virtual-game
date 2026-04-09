@@ -746,6 +746,7 @@ async function startAdminWeb() {
     const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
 
     const payload = {
+      matchPairId: matchId,
       gameHistoryId,
       gameId,
       gameModeId: Number.isFinite(gameModeId) ? gameModeId : 1,

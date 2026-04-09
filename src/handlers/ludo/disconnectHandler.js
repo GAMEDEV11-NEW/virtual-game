@@ -65,6 +65,13 @@ async function cleanupSocketMappings(socket) {
 function registerDisconnectHandler(io, socket) {
   socket.removeAllListeners('disconnect');
   socket.on('disconnect', async () => {
+    if (socket._ludoFinishWatcherInterval) {
+      try {
+        clearInterval(socket._ludoFinishWatcherInterval);
+      } catch (_) {
+      }
+      socket._ludoFinishWatcherInterval = null;
+    }
     await cleanupSocketMappings(socket);
   });
 }

@@ -29,6 +29,39 @@ const LUDO_TIMER_MATCH_SCAN_COUNT = Number(process.env.LUDO_TIMER_MATCH_SCAN_COU
 const LUDO_COMPLETED_REDIS_SWEEP_INTERVAL_MS = Number(process.env.LUDO_COMPLETED_REDIS_SWEEP_INTERVAL_MS || 10000);
 const LUDO_COMPLETED_REDIS_SWEEP_COUNT = Number(process.env.LUDO_COMPLETED_REDIS_SWEEP_COUNT || 500);
 
+function normalizeString(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function safeParseObject(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function resolveMatchProfile(matchData, userId) {
+  const uid = normalizeString(userId);
+  const user1 = normalizeString(matchData?.user1_id);
+  const isUser1 = uid && uid === user1;
+  const profileRaw = isUser1 ? matchData?.user1_profile : matchData?.user2_profile;
+  const profile = safeParseObject(profileRaw) || (profileRaw && typeof profileRaw === 'object' ? profileRaw : {});
+  const usernameFallback = isUser1 ? matchData?.user1_username : matchData?.user2_username;
+  const username = normalizeString(profile?.username || usernameFallback || '');
+  const image = normalizeString(profile?.image || '');
+  const email = normalizeString(profile?.email || '');
+  return {
+    username,
+    profile_data: (username || image || email) ? JSON.stringify({ username, image, email }) : ''
+  };
+}
+
 async function scanKeysByPattern(redisClient, pattern, count = 100) {
   const scanCount = Math.max(1, Number(count) || 100);
   const scanNode = async (node) => {
@@ -303,11 +336,18 @@ async function emitGameFinishedToSockets(gameId, matchData, users = []) {
     const opponentId = uid === user1Id ? user2Id : user1Id;
 
     try {
-      emitter.to(socketId).emit(isWinner ? 'game:won' : 'game:lost', {
+      const eventName = isWinner ? 'game:won' : 'game:lost';
+      const winnerProfile = resolveMatchProfile(matchData, winnerId);
+      const loserProfile = resolveMatchProfile(matchData, isWinner ? opponentId : uid);
+      emitter.to(socketId).emit(eventName, {
         status: isWinner ? 'success' : 'info',
         game_id: gameId,
         winner_id: winnerId,
         loser_id: isWinner ? opponentId : uid,
+        winner_username: winnerProfile.username || '',
+        loser_username: loserProfile.username || '',
+        winner_profile_data: winnerProfile.profile_data || '',
+        loser_profile_data: loserProfile.profile_data || '',
         completed_at: completedAt,
         game_end_reason: gameEndReason,
         timestamp

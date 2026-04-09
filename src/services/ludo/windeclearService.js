@@ -56,22 +56,12 @@ async function notifyMatchFinalizeApi(payload) {
     };
 
     const timeout = Number(process.env.MATCH_FINALIZE_API_TIMEOUT_MS || 5000);
-    console.log('[LudoWinner] match/finalize API request:', { url, payload });
-    const response = await axios.post(url, payload, {
+    await axios.post(url, payload, {
       headers,
       timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000
     });
-    console.log('[LudoWinner] match/finalize API success:', {
-      status: response?.status || 200,
-      data: response?.data || null
-    });
     return { success: true };
   } catch (error) {
-    console.error('[LudoWinner] match/finalize API error:', {
-      message: error?.message || 'match_finalize_api_failed',
-      status: error?.response?.status,
-      data: error?.response?.data || null
-    });
     return {
       success: false,
       error: error?.message || 'match_finalize_api_failed',
@@ -183,15 +173,6 @@ async function processWinnerDeclaration(
   user2Score = 0.0
 ) {
   try {
-    console.log('[LudoWinner] winner declaration started:', {
-      gameId: String(gameId || ''),
-      winnerId: String(winnerId || ''),
-      loserId: String(loserId || ''),
-      contestId: String(contestId || ''),
-      gameEndReason: String(gameEndReason || 'game_completed'),
-      winnerScore: Number(winnerScore || 0),
-      loserScore: Number(loserScore || 0)
-    });
     const now = getCurrentDate();
     const timestamp = now.toISOString();
 
@@ -234,6 +215,7 @@ async function processWinnerDeclaration(
     }
 
     const apiPayload = {
+      matchPairId: String(gameId || ''),
       gameHistoryId: String(finalizeMeta.gameHistoryId || ''),
       gameId: resolvedGameId,
       gameModeId: resolvedGameModeId,
@@ -254,14 +236,6 @@ async function processWinnerDeclaration(
 
     const finalizeApiRes = await notifyMatchFinalizeApi(apiPayload);
 
-    console.log('[LudoWinner] winner declaration completed:', {
-      gameId: String(gameId || ''),
-      winnerId: String(winnerId || ''),
-      loserId: String(resolvedLoserId || ''),
-      api_called: !finalizeApiRes.skipped,
-      api_status: finalizeApiRes.success ? 'ok' : 'failed'
-    });
-
     return {
       success: true,
       timestamp,
@@ -270,9 +244,6 @@ async function processWinnerDeclaration(
       api_error: finalizeApiRes.success ? '' : (finalizeApiRes.error || 'match_finalize_api_failed')
     };
   } catch (e) {
-    console.error('[LudoWinner] winner declaration exception:', {
-      message: e?.message || e?.toString() || 'Unknown error occurred'
-    });
     return {
       success: false,
       error: e?.message || e?.toString() || 'Unknown error occurred',

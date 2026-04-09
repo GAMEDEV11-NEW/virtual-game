@@ -42,6 +42,31 @@ function normalizeString(value) {
     return String(value).trim();
 }
 
+function safeParseObject(value) {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    if (typeof value !== 'string') return null;
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function extractUserProfile(extraData) {
+    const parsed = safeParseObject(extraData);
+    const user = parsed && typeof parsed.user === 'object' ? parsed.user : {};
+    const username = normalizeString(user.username || '');
+    const image = normalizeString(user.image || '');
+    const email = normalizeString(user.email || '');
+    return {
+        username,
+        image,
+        email
+    };
+}
+
 // ============================================================================
 // Matchmaking constants (timings / retries)
 // ============================================================================
@@ -210,6 +235,43 @@ class LudoMatchmakingService {
         return this.session.execute(query, params);
     }
 
+    async _getContestJoinSnapshot(userId, contestId, lId) {
+        const redisService = getRedisService();
+        const uid = normalizeString(userId);
+        const cid = normalizeString(contestId);
+        const lid = normalizeString(lId);
+        if (!uid || !cid) return null;
+
+        const keysToTry = [];
+        if (lid) {
+            keysToTry.push(`contest_join:${uid}:${cid}:${lid}`);
+        }
+        keysToTry.push(`contest_join:${uid}:${cid}`);
+        keysToTry.push(`contest_join:${uid}`);
+
+        for (const key of keysToTry) {
+            try {
+                const parsed = await redisService.get(key);
+                if (parsed && typeof parsed === 'object') return parsed;
+            } catch (_) {
+            }
+        }
+
+        try {
+            const patternKeys = await redisService.scan(`contest_join:${uid}:${cid}:*`, { count: 100 });
+            for (const key of patternKeys) {
+                try {
+                    const parsed = await redisService.get(key);
+                    if (parsed && typeof parsed === 'object') return parsed;
+                } catch (_) {
+                }
+            }
+        } catch (_) {
+        }
+
+        return null;
+    }
+
     async removeContestJoinCache(user) {
         if (!user || !user.userId) return;
         const redisService = getRedisService();
@@ -266,7 +328,7 @@ class LudoMatchmakingService {
     // ============================================================================
     // build sanitized pending user object
     // ============================================================================
-    _buildPendingUser(row) {
+    async _buildPendingUser(row) {
         const userId = getRowValue(row, 'user_id');
         const joinedAt = toDate(getRowValue(row, 'joined_at'));
         if (!userId || !joinedAt) return null;
@@ -274,12 +336,32 @@ class LudoMatchmakingService {
         const b_s = getRowValue(row, 'b_s');
         const b_sValue = b_s === true || b_s === 'true' || b_s === 1 || b_s === '1' ? true : false;
 
+        const contestId = getRowValue(row, 'contest_id');
+        const lId = getRowValue(row, 'id') ? String(getRowValue(row, 'id')) : '';
+        const profile = extractUserProfile(getRowValue(row, 'extra_data'));
+        let resolvedProfile = profile;
+        if (!resolvedProfile.username && !resolvedProfile.image && !resolvedProfile.email) {
+            try {
+                const snapshot = await this._getContestJoinSnapshot(userId, contestId, lId);
+                if (snapshot && typeof snapshot === 'object') {
+                    const extraData = safeParseObject(snapshot.extra_data);
+                    const snapshotUser = extraData && typeof extraData.user === 'object' ? extraData.user : {};
+                    resolvedProfile = {
+                        username: normalizeString(snapshot.username || snapshotUser.username || ''),
+                        image: normalizeString(snapshot.user_image || snapshotUser.image || ''),
+                        email: normalizeString(snapshot.user_email || snapshotUser.email || '')
+                    };
+                }
+            } catch (_) {
+            }
+        }
+
         return {
             userId,
             leagueId: getRowValue(row, 'league_id'),
-            contestId: getRowValue(row, 'contest_id'),
+            contestId,
             joinedAt,
-            id: getRowValue(row, 'id') ? String(getRowValue(row, 'id')) : '',
+            id: lId,
             gameModeId: getRowValue(row, 'gameModeId'),
             gameHistoryId: getRowValue(row, 'gameHistoryId'),
             statusId: getRowValue(row, 'status_id'),
@@ -288,7 +370,10 @@ class LudoMatchmakingService {
             gameType: getRowValue(row, 'game_type'),
             contestType: getRowValue(row, 'contest_type'),
             serverId: getRowValue(row, 'server_id') || SERVER_ID,
-            b_s: b_sValue
+            b_s: b_sValue,
+            username: resolvedProfile.username,
+            userImage: resolvedProfile.image,
+            userEmail: resolvedProfile.email
         };
     }
 
@@ -306,7 +391,7 @@ class LudoMatchmakingService {
         const rows = Array.isArray(result?.[0]) ? result[0] : (result?.rows || []);
 
         for (const row of rows) {
-            const user = this._buildPendingUser(row);
+            const user = await this._buildPendingUser(row);
             if (user) users.push(user);
         }
 
@@ -439,7 +524,7 @@ class LudoMatchmakingService {
         try {
             await this.notifyMatchStart(user1, user2, matchPairId);
         } catch (err) {
-            console.error('[LudoCron] match/start notify failed:', err?.message || String(err));
+            void err;
         }
         await this.ensureSessions(user1.userId, user2.userId);
         return matchPairId;
@@ -472,7 +557,7 @@ class LudoMatchmakingService {
             lobbyId: normalizeString(user1?.contestId || user1?.leagueId || ''),
             playerUserIds: [user1Id, user2Id],
             gameData: {},
-            match_pair_id: normalizeString(matchPairId),
+            matchPairId: normalizeString(matchPairId),
             playersResultExtra: {}
         };
 
@@ -486,6 +571,82 @@ class LudoMatchmakingService {
             });
         } catch (err) {
             
+        }
+    }
+
+    async notifyMatchLeave(user) {
+        const baseUrl = (process.env.MATCH_LEAVE_API_BASE_URL || '').trim();
+        const endpoint = (process.env.MATCH_LEAVE_API_ENDPOINT || '').trim();
+        const gameMatchKey = (process.env.MATCH_LEAVE_API_GAME_MATCH_KEY || '').trim();
+        const timeout = Number(process.env.MATCH_LEAVE_API_TIMEOUT_MS || 5000);
+        const defaultGameId = normalizeString(process.env.MATCH_LEAVE_API_GAME_ID || '1');
+
+        if (!user) return;
+        if (!baseUrl || !endpoint || !gameMatchKey) {
+            return;
+        }
+
+        const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+        const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+        const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
+
+        const userId = Number(user?.userId);
+        if (!Number.isFinite(userId)) return;
+
+        let resolvedGameHistoryId = normalizeString(user?.gameHistoryId || '');
+        if (!resolvedGameHistoryId) {
+            const extraData = safeParseObject(user?.extraData);
+            resolvedGameHistoryId = normalizeString(extraData?.gameHistoryId || '');
+        }
+        if (!resolvedGameHistoryId) {
+            try {
+                const lId = normalizeString(user?.id || '');
+                let rows = [];
+                if (lId) {
+                    const [byLid] = await this._execute(
+                        `SELECT gameHistoryId
+                         FROM ludo_game
+                         WHERE is_deleted = 0 AND l_id = ?
+                         ORDER BY updated_at DESC
+                         LIMIT 1`,
+                        [lId]
+                    );
+                    rows = Array.isArray(byLid) ? byLid : [];
+                }
+                if ((!rows || rows.length === 0) && user?.userId && user?.contestId) {
+                    const [byUserContest] = await this._execute(
+                        `SELECT gameHistoryId
+                         FROM ludo_game
+                         WHERE is_deleted = 0 AND user_id = ? AND contest_id = ?
+                         ORDER BY updated_at DESC
+                         LIMIT 1`,
+                        [user.userId, user.contestId]
+                    );
+                    rows = Array.isArray(byUserContest) ? byUserContest : [];
+                }
+                resolvedGameHistoryId = normalizeString(rows?.[0]?.gameHistoryId || '');
+            } catch (_) {
+            }
+        }
+        if (!resolvedGameHistoryId) return;
+
+        const payload = {
+            gameModeId: normalizeString(user?.gameModeId || ''),
+            gameId: defaultGameId,
+            userId,
+            gameHistoryId: resolvedGameHistoryId
+        };
+
+        try {
+            await axios.post(url, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Game-Match-Key': gameMatchKey
+                },
+                timeout
+            });
+        } catch (err) {
+            void err;
         }
     }
 
@@ -604,6 +765,18 @@ class LudoMatchmakingService {
             game_id: matchPairId,
             user1_id: user1.userId,
             user2_id: user2.userId,
+            user1_username: normalizeString(user1.username || ''),
+            user2_username: normalizeString(user2.username || ''),
+            user1_profile: {
+                username: normalizeString(user1.username || ''),
+                image: normalizeString(user1.userImage || ''),
+                email: normalizeString(user1.userEmail || '')
+            },
+            user2_profile: {
+                username: normalizeString(user2.username || ''),
+                image: normalizeString(user2.userImage || ''),
+                email: normalizeString(user2.userEmail || '')
+            },
             user1_time: startTime,
             user2_time: startTime,
             turn,
@@ -782,6 +955,10 @@ class LudoMatchmakingService {
         try {
             try {
                 await this.processExpiredEntryRefund(user);
+            } catch (err) {
+            }
+            try {
+                await this.notifyMatchLeave(user);
             } catch (err) {
             }
             const serverId = user.serverId || SERVER_ID;

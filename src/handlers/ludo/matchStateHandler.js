@@ -1,7 +1,8 @@
 const withAuth = require('../../middleware/withAuth');
 const { redis: redisClient } = require('../../utils/redis');
-const { fetchMatchOrEmitError, validateRequiredFields, emitStandardError } = require('../../utils/gameUtils');
+const { validateRequiredFields, emitStandardError, safeParseRedisData } = require('../../utils/gameUtils');
 const { GAME_CONFIG } = require('../../config/gameConfig');
+const { REDIS_KEYS } = require('../../constants');
 
 const EVENTS = {
   REQUEST: 'get:match_state',
@@ -18,6 +19,89 @@ function sameId(a, b) {
   const nb = normalizeId(b);
   if (!na || !nb) return false;
   return na === nb;
+}
+
+function safeParseObject(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function stringifyProfile(profile = {}) {
+  const username = normalizeId(profile.username || '');
+  const image = normalizeId(profile.image || '');
+  const email = normalizeId(profile.email || '');
+  if (!username && !image && !email) return '';
+  return JSON.stringify({ username, image, email });
+}
+
+async function getParsedRedisObject(key) {
+  try {
+    const value = await redisClient.get(key);
+    const parsed = safeParseRedisData(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getContestJoinSnapshotFromRedis(userId, contestId, lId) {
+  const uid = normalizeId(userId);
+  const cid = normalizeId(contestId);
+  const lid = normalizeId(lId);
+  if (!uid || !cid) return null;
+
+  const keys = [];
+  if (lid) keys.push(`contest_join:${uid}:${cid}:${lid}`);
+  keys.push(`contest_join:${uid}:${cid}`);
+  keys.push(`contest_join:${uid}`);
+
+  for (const key of keys) {
+    const parsed = await getParsedRedisObject(key);
+    if (parsed) return parsed;
+  }
+
+  try {
+    const scanned = await redisClient.scan(`contest_join:${uid}:${cid}:*`, { count: 50 });
+    for (const key of scanned) {
+      const parsed = await getParsedRedisObject(key);
+      if (parsed) return parsed;
+    }
+  } catch (_) {
+  }
+
+  return null;
+}
+
+function profileFromSnapshot(snapshot = null) {
+  if (!snapshot || typeof snapshot !== 'object') return { username: '', image: '', email: '' };
+  const extraData = safeParseObject(snapshot.extra_data) || {};
+  const user = (extraData.user && typeof extraData.user === 'object') ? extraData.user : {};
+  return {
+    username: normalizeId(snapshot.username || user.username || ''),
+    image: normalizeId(snapshot.user_image || user.image || ''),
+    email: normalizeId(snapshot.user_email || user.email || '')
+  };
+}
+
+function profileFromMatch(match, targetUserId) {
+  const uid = normalizeId(targetUserId);
+  if (!uid || !match) return { username: '', image: '', email: '' };
+  const isUser1 = sameId(uid, match.user1_id);
+  const profileRaw = isUser1 ? match.user1_profile : match.user2_profile;
+  const profile = safeParseObject(profileRaw) || (profileRaw && typeof profileRaw === 'object' ? profileRaw : {});
+  const usernameFallback = isUser1 ? match.user1_username : match.user2_username;
+  return {
+    username: normalizeId(profile.username || usernameFallback || ''),
+    image: normalizeId(profile.image || ''),
+    email: normalizeId(profile.email || '')
+  };
 }
 
 function toDateSafe(value) {
@@ -43,12 +127,18 @@ function buildTimeLeftData(match) {
   };
 }
 
-function buildMatchStateResponse(match, userId) {
+function buildMatchStateResponse(match, userId, selfProfile = {}, opponentProfile = {}) {
   const timeLeft = buildTimeLeftData(match);
   return {
     status: 'success',
     game_id: normalizeId(match?.game_id || ''),
     user_id: normalizeId(userId),
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: stringifyProfile(selfProfile),
+    opponent_full_name: normalizeId(opponentProfile.username || ''),
+    opponent_profile_data: stringifyProfile(opponentProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    opponent_username: normalizeId(opponentProfile.username || ''),
     match_state: {
       game_id: normalizeId(match?.game_id || ''),
       user1_id: normalizeId(match?.user1_id || ''),
@@ -75,17 +165,33 @@ function buildMatchStateResponse(match, userId) {
   };
 }
 
+function buildPendingMatchStateResponse(userId, contestId, lId, selfProfile = {}) {
+  return {
+    status: 'pending',
+    game_id: '',
+    user_id: normalizeId(userId),
+    contest_id: normalizeId(contestId),
+    l_id: normalizeId(lId),
+    user_full_name: normalizeId(selfProfile.username || ''),
+    user_profile_data: stringifyProfile(selfProfile),
+    user_username: normalizeId(selfProfile.username || ''),
+    match_state: null,
+    message: 'Waiting for match...',
+    timestamp: new Date().toISOString()
+  };
+}
+
 function registerMatchStateHandler(io, socket) {
   socket.removeAllListeners(EVENTS.REQUEST);
   socket.on(EVENTS.REQUEST, async (event) => {
     try {
       await withAuth(socket, event, EVENTS.RESPONSE, async (user, data) => {
         const payload = (data && typeof data === 'object') ? data : {};
-        if (!validateRequiredFields(socket, payload, ['game_id', 'contest_id', 'l_id', 'user_id'], EVENTS.RESPONSE)) {
+        if (!validateRequiredFields(socket, payload, ['contest_id', 'l_id', 'user_id'], EVENTS.RESPONSE)) {
           return;
         }
 
-        const requiredStringFields = ['game_id', 'contest_id', 'l_id', 'user_id'];
+        const requiredStringFields = ['contest_id', 'l_id', 'user_id'];
         const invalidField = requiredStringFields.find((field) => !normalizeId(payload[field]));
         if (invalidField) {
           emitStandardError(socket, {
@@ -98,6 +204,8 @@ function registerMatchStateHandler(io, socket) {
         }
 
         const userId = normalizeId(payload.user_id);
+        const contestId = normalizeId(payload.contest_id);
+        const lId = normalizeId(payload.l_id);
         const authUserId = normalizeId(user?.user_id || socket?.user?.user_id || '');
         if (authUserId && userId !== authUserId) {
           emitStandardError(socket, {
@@ -110,8 +218,23 @@ function registerMatchStateHandler(io, socket) {
         }
 
         const gameId = normalizeId(payload.game_id);
-        const match = await fetchMatchOrEmitError(socket, gameId, redisClient, EVENTS.RESPONSE);
-        if (!match) return;
+        const selfSnapshot = await getContestJoinSnapshotFromRedis(userId, contestId, lId);
+        const selfProfile = profileFromSnapshot(selfSnapshot);
+        if (!gameId) {
+          socket.emit(EVENTS.RESPONSE, buildPendingMatchStateResponse(userId, contestId, lId, selfProfile));
+          return;
+        }
+
+        const matchRaw = await redisClient.get(REDIS_KEYS.MATCH(gameId));
+        if (!matchRaw) {
+          socket.emit(EVENTS.RESPONSE, buildPendingMatchStateResponse(userId, contestId, lId, selfProfile));
+          return;
+        }
+        const match = safeParseRedisData(matchRaw);
+        if (!match) {
+          socket.emit(EVENTS.RESPONSE, buildPendingMatchStateResponse(userId, contestId, lId, selfProfile));
+          return;
+        }
 
         if (!sameId(userId, match.user1_id) && !sameId(userId, match.user2_id)) {
           emitStandardError(socket, {
@@ -123,7 +246,23 @@ function registerMatchStateHandler(io, socket) {
           return;
         }
 
-        socket.emit(EVENTS.RESPONSE, buildMatchStateResponse(match, userId));
+        const opponentUserId = sameId(userId, match.user1_id) ? normalizeId(match.user2_id) : normalizeId(match.user1_id);
+        const opponentSnapshot = await getContestJoinSnapshotFromRedis(opponentUserId, contestId, '');
+        const opponentProfileFromSnapshot = profileFromSnapshot(opponentSnapshot);
+        const selfProfileFromMatch = profileFromMatch(match, userId);
+        const opponentProfileFromMatch = profileFromMatch(match, opponentUserId);
+        const resolvedSelfProfile = {
+          username: normalizeId(selfProfile.username || selfProfileFromMatch.username || ''),
+          image: normalizeId(selfProfile.image || selfProfileFromMatch.image || ''),
+          email: normalizeId(selfProfile.email || selfProfileFromMatch.email || '')
+        };
+        const resolvedOpponentProfile = {
+          username: normalizeId(opponentProfileFromSnapshot.username || opponentProfileFromMatch.username || ''),
+          image: normalizeId(opponentProfileFromSnapshot.image || opponentProfileFromMatch.image || ''),
+          email: normalizeId(opponentProfileFromSnapshot.email || opponentProfileFromMatch.email || '')
+        };
+
+        socket.emit(EVENTS.RESPONSE, buildMatchStateResponse(match, userId, resolvedSelfProfile, resolvedOpponentProfile));
       });
     } catch (err) {
       emitStandardError(socket, {
