@@ -37,6 +37,11 @@ function getFirstRow(result) {
     return rows.length > 0 ? rows[0] : null;
 }
 
+function normalizeString(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).trim();
+}
+
 // ============================================================================
 // Matchmaking constants (timings / retries)
 // ============================================================================
@@ -275,6 +280,8 @@ class LudoMatchmakingService {
             contestId: getRowValue(row, 'contest_id'),
             joinedAt,
             id: getRowValue(row, 'id') ? String(getRowValue(row, 'id')) : '',
+            gameModeId: getRowValue(row, 'gameModeId'),
+            gameHistoryId: getRowValue(row, 'gameHistoryId'),
             statusId: getRowValue(row, 'status_id'),
             joinDay: getRowValue(row, 'join_day'),
             extraData: getRowValue(row, 'extra_data'),
@@ -429,8 +436,57 @@ class LudoMatchmakingService {
             user1Dice: user1DiceIface,
             user2Dice: user2DiceIface
         });
+        try {
+            await this.notifyMatchStart(user1, user2, matchPairId);
+        } catch (err) {
+            console.error('[LudoCron] match/start notify failed:', err?.message || String(err));
+        }
         await this.ensureSessions(user1.userId, user2.userId);
         return matchPairId;
+    }
+
+    async notifyMatchStart(user1, user2, matchPairId = '') {
+        const baseUrl = (process.env.MATCH_START_API_BASE_URL || '').trim();
+        const endpoint = (process.env.MATCH_START_API_ENDPOINT || '').trim();
+        const gameMatchKey = (process.env.MATCH_START_API_GAME_MATCH_KEY || '').trim();
+        const timeout = Number(process.env.MATCH_START_API_TIMEOUT_MS || 5000);
+        const defaultGameId = normalizeString(process.env.MATCH_START_API_GAME_ID || '5');
+        const defaultGameModeId = normalizeString(process.env.MATCH_START_API_DEFAULT_GAME_MODE_ID || '1');
+
+        if (!baseUrl || !endpoint || !gameMatchKey) return;
+
+        const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+        const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+        const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
+
+        const user1Id = Number(user1?.userId);
+        const user2Id = Number(user2?.userId);
+        if (!Number.isFinite(user1Id) || !Number.isFinite(user2Id)) return;
+
+        const resolvedGameModeId = Number.isNaN(Number(user1?.gameModeId))
+            ? Number(defaultGameModeId)
+            : Number(user1.gameModeId);
+        const payload = {
+            gameId: defaultGameId,
+            gameModeId: Number.isFinite(resolvedGameModeId) ? resolvedGameModeId : Number(defaultGameModeId),
+            lobbyId: normalizeString(user1?.contestId || user1?.leagueId || ''),
+            playerUserIds: [user1Id, user2Id],
+            gameData: {},
+            match_pair_id: normalizeString(matchPairId),
+            playersResultExtra: {}
+        };
+
+        try {
+            await axios.post(url, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Game-Match-Key': gameMatchKey
+                },
+                timeout
+            });
+        } catch (err) {
+            
+        }
     }
 
     // ============================================================================

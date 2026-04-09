@@ -302,6 +302,7 @@ async function loadHistory() {
       <td>${formatTimestamp(row.ended_at)}</td>
       <td>
         <button type="button" data-action="preview-history" data-index="${index}">View</button>
+        ${hasMatchId ? `<button type="button" data-action="finalize-history" data-index="${index}">Finalize API</button>` : ''}
         <button type="button" data-action="delete-history" data-index="${index}">Delete</button>
       </td>
     </tr>
@@ -508,6 +509,37 @@ async function initHistoryPage() {
 
       if (action === 'preview-history') {
         loadHistoryS3Preview(row).catch(() => {});
+        return;
+      }
+
+      if (action === 'finalize-history') {
+        const matchId = String(row.match_id || '').trim();
+        if (!matchId) {
+          renderHistoryPreview('Finalize failed: missing match_id.');
+          return;
+        }
+        const ok = window.confirm(`Call finalize API for match "${matchId}"?`);
+        if (!ok) return;
+        fetch(`/api/historic/${encodeURIComponent(matchId)}/finalize`, {
+          method: 'POST',
+          credentials: 'include'
+        })
+          .then(async (res) => {
+            const data = await res.json();
+            renderHistoryPreview({
+              status: res.status === 200 ? 'ok' : 'error',
+              message: data.message || (res.status === 200 ? 'match_finalize_api_called' : 'match_finalize_api_failed'),
+              match_id: matchId,
+              details: data
+            });
+          })
+          .catch((error) => {
+            renderHistoryPreview({
+              status: 'error',
+              message: error?.message || 'match_finalize_api_failed',
+              match_id: matchId
+            });
+          });
         return;
       }
 

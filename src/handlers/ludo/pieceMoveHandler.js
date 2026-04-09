@@ -942,6 +942,14 @@ function registerPieceMoveHandler(io, socket) {
         }
         
         if (gameWon && winnerInfo) {
+          const finishedPayloadBase = {
+            status: 'game_completed',
+            game_id: validatedMoveData.game_id,
+            winner_id: user.user_id,
+            completed_at: winnerInfo.timestamp,
+            game_end_reason: 'all_pieces_home',
+            timestamp: new Date().toISOString()
+          };
           try {
             socket.emit('game:won', {
               status: 'success',

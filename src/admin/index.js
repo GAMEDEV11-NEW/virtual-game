@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const crypto = require('crypto');
 const Fastify = require('fastify');
+const axios = require('axios');
 const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
 const mysqlClient = require('../services/mysql/client');
 const { getRedisService } = require('../utils/redis');
@@ -671,6 +672,127 @@ async function startAdminWeb() {
     return { code: 200, body: { status: 'ok', l_id: lId, deleted: affected } };
   }
 
+  async function resendMatchFinalizeByMatchId(matchIdRaw) {
+    const matchId = String(matchIdRaw || '').trim();
+    if (!matchId) {
+      return { code: 400, body: { status: 'error', message: 'match_id_required' } };
+    }
+
+    const [rows] = await mysqlClient.query(
+      `SELECT
+         match_id,
+         user_id,
+         opponent_user_id,
+         winner_user_id,
+         contest_id,
+         gameModeId,
+         gameHistoryId,
+         updated_at
+       FROM ludo_game
+       WHERE is_deleted = 0 AND match_id = ?
+       ORDER BY updated_at DESC`,
+      [matchId]
+    );
+    const list = Array.isArray(rows) ? rows : [];
+    if (list.length === 0) {
+      return { code: 404, body: { status: 'error', message: 'match_not_found' } };
+    }
+
+    const uniqPlayers = [];
+    const addPlayer = (value) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) return;
+      if (uniqPlayers.includes(normalized)) return;
+      uniqPlayers.push(normalized);
+    };
+    list.forEach((row) => {
+      addPlayer(row?.user_id);
+      addPlayer(row?.opponent_user_id);
+    });
+    if (uniqPlayers.length < 2) {
+      return { code: 400, body: { status: 'error', message: 'players_not_resolvable' } };
+    }
+
+    const winnerUserId = String(list.find((r) => String(r?.winner_user_id || '').trim())?.winner_user_id || '').trim();
+    if (!winnerUserId) {
+      return { code: 400, body: { status: 'error', message: 'winner_not_found_for_match' } };
+    }
+    if (!uniqPlayers.includes(winnerUserId)) {
+      return { code: 400, body: { status: 'error', message: 'winner_not_in_players' } };
+    }
+
+    const loserUserId = uniqPlayers.find((id) => id !== winnerUserId) || '';
+    if (!loserUserId) {
+      return { code: 400, body: { status: 'error', message: 'loser_not_found_for_match' } };
+    }
+
+    const winnerRow = list.find((row) => String(row?.user_id || '').trim() === winnerUserId) || null;
+    const loserRow = list.find((row) => String(row?.user_id || '').trim() === loserUserId) || null;
+    const gameModeRaw = winnerRow?.gameModeId ?? loserRow?.gameModeId ?? list[0]?.gameModeId ?? '';
+    const gameHistoryId = String(winnerRow?.gameHistoryId || loserRow?.gameHistoryId || list[0]?.gameHistoryId || '').trim();
+    const gameModeId = Number.isFinite(Number(gameModeRaw)) ? Number(gameModeRaw) : Number(process.env.MATCH_FINALIZE_API_DEFAULT_GAME_MODE_ID || 1);
+    const gameId = String(process.env.MATCH_FINALIZE_API_GAME_ID || '1').trim() || '1';
+
+    const baseUrl = String(process.env.MATCH_FINALIZE_API_BASE_URL || '').trim();
+    const endpoint = String(process.env.MATCH_FINALIZE_API_ENDPOINT || '').trim();
+    const gameMatchKey = String(process.env.MATCH_FINALIZE_API_GAME_MATCH_KEY || '').trim();
+    const timeout = Number(process.env.MATCH_FINALIZE_API_TIMEOUT_MS || 5000);
+    if (!baseUrl || !endpoint || !gameMatchKey) {
+      return { code: 400, body: { status: 'error', message: 'match_finalize_api_not_configured' } };
+    }
+
+    const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
+
+    const payload = {
+      gameHistoryId,
+      gameId,
+      gameModeId: Number.isFinite(gameModeId) ? gameModeId : 1,
+      winnerUserId: Number(winnerUserId),
+      players: [
+        { userId: Number(winnerUserId), result: 'win', score: 100 },
+        { userId: Number(loserUserId), result: 'lose', score: 0 }
+      ]
+    };
+
+    try {
+      const response = await axios.post(url, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Game-Match-Key': gameMatchKey
+        },
+        timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000
+      });
+      return {
+        code: 200,
+        body: {
+          status: 'ok',
+          message: 'match_finalize_api_called',
+          match_id: matchId,
+          winner_user_id: winnerUserId,
+          loser_user_id: loserUserId,
+          payload,
+          api_status: response?.status || 200,
+          api_response: response?.data || null
+        }
+      };
+    } catch (error) {
+      const statusCode = Number(error?.response?.status || 500);
+      return {
+        code: statusCode,
+        body: {
+          status: 'error',
+          message: error?.message || 'match_finalize_api_failed',
+          match_id: matchId,
+          payload,
+          api_status: error?.response?.status || null,
+          api_response: error?.response?.data || null
+        }
+      };
+    }
+  }
+
   adminServer.delete('/api/historic/:lid', async (request, reply) => {
     try {
       const result = await deleteHistoricByLid(request.params?.lid);
@@ -695,6 +817,20 @@ async function startAdminWeb() {
       return {
         status: 'error',
         message: err?.message || 'failed_to_delete_historic_row'
+      };
+    }
+  });
+
+  adminServer.post('/api/historic/:matchId/finalize', async (request, reply) => {
+    try {
+      const result = await resendMatchFinalizeByMatchId(request.params?.matchId);
+      reply.code(result.code);
+      return result.body;
+    } catch (err) {
+      reply.code(500);
+      return {
+        status: 'error',
+        message: err?.message || 'failed_to_finalize_match'
       };
     }
   });

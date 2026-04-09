@@ -135,6 +135,8 @@ const DB_QUERIES = {
       NULL AS extra_data,
       game_type,
       contest_type,
+      gameModeId,
+      gameHistoryId,
       server_id,
       0 AS b_s
     FROM ludo_game
@@ -167,6 +169,8 @@ const DB_QUERIES = {
       match_id,
       league_id,
       turn_id,
+      gameModeId,
+      gameHistoryId,
       status,
       contest_id,
       is_deleted
@@ -184,6 +188,8 @@ const DB_QUERIES = {
       match_id,
       league_id,
       turn_id,
+      gameModeId,
+      gameHistoryId,
       status,
       contest_id,
       is_deleted
@@ -202,6 +208,8 @@ const DB_QUERIES = {
       match_id,
       league_id,
       turn_id,
+      gameModeId,
+      gameHistoryId,
       status,
       contest_id,
       is_deleted
@@ -363,9 +371,11 @@ const DB_QUERIES = {
       status_id,
       game_type,
       contest_type,
+      gameModeId,
+      gameHistoryId,
       server_id,
       is_deleted
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON DUPLICATE KEY UPDATE
       contest_id = VALUES(contest_id),
       league_id = VALUES(league_id),
@@ -375,6 +385,8 @@ const DB_QUERIES = {
       status_id = VALUES(status_id),
       game_type = VALUES(game_type),
       contest_type = VALUES(contest_type),
+      gameModeId = VALUES(gameModeId),
+      gameHistoryId = VALUES(gameHistoryId),
       server_id = VALUES(server_id),
       is_deleted = 0,
       updated_at = NOW(3)

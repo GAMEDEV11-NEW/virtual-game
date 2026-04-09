@@ -122,6 +122,33 @@ async function registerQuitGameHandler(io, socket) {
 
       notifyOpponent(io, opponentSocketId, gameData);
       sendQuitResponse(socket, gameData);
+      try {
+        const winnerPayload = {
+          status: 'success',
+          game_id: game_id,
+          winner_id: opponentId,
+          loser_id: user_id,
+          completed_at: gameData.quitAt,
+          game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
+          timestamp: new Date().toISOString()
+        };
+        const loserPayload = {
+          status: 'info',
+          game_id: game_id,
+          winner_id: opponentId,
+          loser_id: user_id,
+          completed_at: gameData.quitAt,
+          game_end_reason: GAME_END_REASONS.OPPONENT_QUIT,
+          timestamp: new Date().toISOString()
+        };
+
+        if (opponentSocketId) {
+          io.to(opponentSocketId).emit('game:won', winnerPayload);
+        }
+
+        socket.emit('game:lost', loserPayload);
+      } catch (_) {
+      }
     } catch (error) {
       emitError(socket, {
         code: 'internal_error',

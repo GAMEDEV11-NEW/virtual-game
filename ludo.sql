@@ -10,6 +10,8 @@ CREATE TABLE ludo_game (
   -- contest/match routing
   contest_id BIGINT UNSIGNED NOT NULL,
   league_id BIGINT UNSIGNED NOT NULL,
+  gameModeId VARCHAR(128) NULL,
+  gameHistoryId VARCHAR(128) NULL,
   opponent_league_id BIGINT UNSIGNED NULL,
   match_id VARCHAR(64) NULL,
 
@@ -59,7 +61,5 @@ CREATE TABLE ludo_game (
   KEY idx_match_lookup (match_id),
   KEY idx_opponent_lid (opponent_l_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
 
 

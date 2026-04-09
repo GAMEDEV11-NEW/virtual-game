@@ -6,27 +6,78 @@ const { archiveLudoGameState } = require('./archiveService');
 const { updateMatchPairStatus } = require('./gameService');
 const mysqlClient = require('../mysql/client');
 
-async function notifyWinnerApi(payload) {
-  const url = String(process.env.LUDO_WINNER_API_URL || '').trim();
-  if (!url) {
-    return { success: true, skipped: true, reason: 'winner_api_url_not_configured' };
+async function getFinalizeMeta(gameId, winnerId, loserId) {
+  try {
+    const [rows] = await mysqlClient.execute(
+      `SELECT user_id, gameModeId, gameHistoryId
+       FROM ludo_game
+       WHERE match_id = ? AND is_deleted = 0`,
+      [String(gameId || '')]
+    );
+    const list = Array.isArray(rows) ? rows : [];
+    const winnerRow = list.find((row) => String(row?.user_id || '') === String(winnerId || ''));
+    const loserRow = list.find((row) => String(row?.user_id || '') === String(loserId || ''));
+    const firstRow = list[0] || {};
+    const secondRow = list[1] || {};
+
+    const resolvedLoserId = loserId || loserRow?.user_id || secondRow?.user_id || '';
+    const resolvedGameModeId = winnerRow?.gameModeId ?? loserRow?.gameModeId ?? firstRow?.gameModeId ?? '';
+    const resolvedGameHistoryId = winnerRow?.gameHistoryId || loserRow?.gameHistoryId || firstRow?.gameHistoryId || '';
+
+    return {
+      loserUserId: String(resolvedLoserId || ''),
+      gameModeId: resolvedGameModeId,
+      gameHistoryId: String(resolvedGameHistoryId || '')
+    };
+  } catch (_) {
+    return {
+      loserUserId: String(loserId || ''),
+      gameModeId: '',
+      gameHistoryId: ''
+    };
+  }
+}
+
+async function notifyMatchFinalizeApi(payload) {
+  const baseUrl = String(process.env.MATCH_FINALIZE_API_BASE_URL || '').trim();
+  const endpoint = String(process.env.MATCH_FINALIZE_API_ENDPOINT || '').trim();
+  const gameMatchKey = String(process.env.MATCH_FINALIZE_API_GAME_MATCH_KEY || '').trim();
+  if (!baseUrl || !endpoint || !gameMatchKey) {
+    return { success: true, skipped: true, reason: 'match_finalize_api_not_configured' };
   }
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const bearer = String(process.env.LUDO_WINNER_API_BEARER_TOKEN || '').trim();
-    const apiKey = String(process.env.LUDO_WINNER_API_KEY || '').trim();
-    if (bearer) headers.Authorization = `Bearer ${bearer}`;
-    if (apiKey) headers['x-api-key'] = apiKey;
+    const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Game-Match-Key': gameMatchKey
+    };
 
-    const timeout = Number(process.env.LUDO_WINNER_API_TIMEOUT_MS || 5000);
-    await axios.post(url, payload, {
+    const timeout = Number(process.env.MATCH_FINALIZE_API_TIMEOUT_MS || 5000);
+    console.log('[LudoWinner] match/finalize API request:', { url, payload });
+    const response = await axios.post(url, payload, {
       headers,
       timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 5000
     });
+    console.log('[LudoWinner] match/finalize API success:', {
+      status: response?.status || 200,
+      data: response?.data || null
+    });
     return { success: true };
   } catch (error) {
-    return { success: false, error: error?.message || 'winner_api_failed' };
+    console.error('[LudoWinner] match/finalize API error:', {
+      message: error?.message || 'match_finalize_api_failed',
+      status: error?.response?.status,
+      data: error?.response?.data || null
+    });
+    return {
+      success: false,
+      error: error?.message || 'match_finalize_api_failed',
+      status: error?.response?.status,
+      data: error?.response?.data || null
+    };
   }
 }
 
@@ -132,6 +183,15 @@ async function processWinnerDeclaration(
   user2Score = 0.0
 ) {
   try {
+    console.log('[LudoWinner] winner declaration started:', {
+      gameId: String(gameId || ''),
+      winnerId: String(winnerId || ''),
+      loserId: String(loserId || ''),
+      contestId: String(contestId || ''),
+      gameEndReason: String(gameEndReason || 'game_completed'),
+      winnerScore: Number(winnerScore || 0),
+      loserScore: Number(loserScore || 0)
+    });
     const now = getCurrentDate();
     const timestamp = now.toISOString();
 
@@ -154,29 +214,65 @@ async function processWinnerDeclaration(
       };
     }
 
+    const finalizeMeta = await getFinalizeMeta(gameId, winnerId, loserId);
+    const resolvedGameId = String(process.env.MATCH_FINALIZE_API_GAME_ID || '1').trim() || '1';
+    const fallbackGameModeId = Number(process.env.MATCH_FINALIZE_API_DEFAULT_GAME_MODE_ID || 1);
+    const resolvedGameModeId = Number.isFinite(Number(finalizeMeta.gameModeId))
+      ? Number(finalizeMeta.gameModeId)
+      : (Number.isFinite(fallbackGameModeId) ? fallbackGameModeId : 1);
+    const resolvedLoserId = String(finalizeMeta.loserUserId || loserId || '');
+    const winnerUserIdNum = Number(winnerId);
+    const loserUserIdNum = Number(resolvedLoserId);
+    if (!Number.isFinite(winnerUserIdNum) || !Number.isFinite(loserUserIdNum)) {
+      return {
+        success: true,
+        timestamp,
+        api_called: false,
+        api_status: 'skipped',
+        api_error: 'invalid_winner_or_loser_user_id'
+      };
+    }
+
     const apiPayload = {
-      game_id: String(gameId || ''),
-      winner_user_id: String(winnerId || ''),
-      loser_user_id: String(loserId || ''),
-      contest_id: String(contestId || ''),
-      game_end_reason: String(gameEndReason || 'game_completed'),
-      winner_score: Number(winnerScore || 0),
-      loser_score: Number(loserScore || 0),
-      user1_score: Number(user1Score || 0),
-      user2_score: Number(user2Score || 0),
-      declared_at: timestamp
+      gameHistoryId: String(finalizeMeta.gameHistoryId || ''),
+      gameId: resolvedGameId,
+      gameModeId: resolvedGameModeId,
+      winnerUserId: winnerUserIdNum,
+      players: [
+        {
+          userId: winnerUserIdNum,
+          result: 'win',
+          score: Number(winnerScore || 0)
+        },
+        {
+          userId: loserUserIdNum,
+          result: 'lose',
+          score: Number(loserScore || 0)
+        }
+      ]
     };
 
-    const winnerApiRes = await notifyWinnerApi(apiPayload);
+    const finalizeApiRes = await notifyMatchFinalizeApi(apiPayload);
+
+    console.log('[LudoWinner] winner declaration completed:', {
+      gameId: String(gameId || ''),
+      winnerId: String(winnerId || ''),
+      loserId: String(resolvedLoserId || ''),
+      api_called: !finalizeApiRes.skipped,
+      api_status: finalizeApiRes.success ? 'ok' : 'failed'
+    });
 
     return {
       success: true,
       timestamp,
-      api_called: !winnerApiRes.skipped,
-      api_status: winnerApiRes.success ? 'ok' : 'failed',
-      api_error: winnerApiRes.success ? '' : (winnerApiRes.error || 'winner_api_failed')
+      api_called: !finalizeApiRes.skipped,
+      api_status: finalizeApiRes.success ? 'ok' : 'failed',
+      api_error: finalizeApiRes.success ? '' : (finalizeApiRes.error || 'match_finalize_api_failed')
     };
   } catch (e) {
+    console.error('[LudoWinner] winner declaration exception:', {
+      message: e?.message || e?.toString() || 'Unknown error occurred'
+    });
     return {
       success: false,
       error: e?.message || e?.toString() || 'Unknown error occurred',

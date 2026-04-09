@@ -1,4 +1,3 @@
-const sessionService = require('../utils/sessionService');
 const { redis } = require('../utils/redis');
 const mysqlClient = require('../services/mysql/client');
 const { REDIS_KEYS, DB_QUERIES } = require('../constants');
@@ -43,6 +42,8 @@ function buildContestSnapshot(userId, contestId, rawRecord, clientLid = '') {
     contest_id: String(resolvedContestId),
     league_id: record.league_id ? String(record.league_id) : '',
     l_id: resolvedLid,
+    gameModeId: normalizeString(record.gameModeId || record.game_mode_id || ''),
+    gameHistoryId: normalizeString(record.gameHistoryId || record.game_history_id || ''),
     game_type: record.game_type || '',
     contest_type: record.contest_type || '',
     entry_fee: record.entry_fee ?? null,
@@ -104,6 +105,8 @@ async function persistPendingJoinBackground(snapshot) {
   const lId = normalizeString(snapshot?.l_id) || generateLid(userId, leagueId);
   const gameType = normalizeString(snapshot?.game_type || 'ludo');
   const contestType = normalizeString(snapshot?.contest_type || 'simple');
+  const gameModeId = normalizeString(snapshot?.gameModeId || snapshot?.game_mode_id || '');
+  const gameHistoryId = normalizeString(snapshot?.gameHistoryId || snapshot?.game_history_id || '');
   const serverId = normalizeString(config.serverId || '0');
 
   try {
@@ -127,6 +130,8 @@ async function persistPendingJoinBackground(snapshot) {
       '1',
       gameType,
       contestType,
+      gameModeId || null,
+      gameHistoryId || null,
       serverId
     ]);
   } catch (err) {
@@ -218,6 +223,8 @@ function buildNormalizedValidateUserPayload(apiData, fallback = {}) {
       l_id: sessionId,
       game_type: gameId === '1' ? 'ludo' : '',
       contest_type: gameId === '1' ? 'simpleludo' : '',
+      gameModeId: normalizeString(result.gameModeId ?? gameMode.id ?? ''),
+      gameHistoryId: normalizeString(result.gameHistoryId || session.gameHistoryId || ''),
       entry_fee: lobby.entryFee ?? null,
       joined_at: joinedAt,
       status: normalizeString(session.status || 'pending') || 'pending',
@@ -318,7 +325,7 @@ async function socketAuthMiddleware(socket, next) {
     socket.handshake.query?.l_id ||
     '';
   const jwtToken = extractSocketJwtToken(socket);
-
+ 
   const required = {
     user_id: normalizeString(userId),
     contest_id: normalizeString(contestId),
@@ -341,26 +348,7 @@ async function socketAuthMiddleware(socket, next) {
       lId: required.l_id
     });
 
-    // 3) Then continue session/socket mapping flow.
-    const existingSession = await sessionService.getSessionOrThrow(required.user_id, { skipRedisRead: true });
-    
-    if (existingSession) {
-      if (existingSession.socket_id && existingSession.socket_id !== socketId) {
-        try {
-          const existingSocket = socket.server.sockets.sockets.get(existingSession.socket_id);
-          if (existingSocket) {
-            existingSocket.disconnect(true);
-          }
-        } catch (error) {
-        }
-      }
-    }
-    
-    const updated = await sessionService.updateSessionSocketIdForReconnect(required.user_id, socketId);
-    if (!updated) {
-      return next(new Error('Authentication error: Failed to update user session'));
-    }
-    
+    // 3) Then continue socket mapping flow (session API dependency removed).
     await enforceSingleLidSocket(socket, required.l_id, socketId);
     await cleanupExistingSocketMappings(required.user_id, socketId);
     
@@ -379,7 +367,7 @@ async function socketAuthMiddleware(socket, next) {
       contest_id: required.contest_id,
       l_id: required.l_id,
       jwt_token: required.jwt_token,
-      session_token: existingSession?.session_token || '',
+      session_token: '',
       contest_join_data: contestJoinSnapshot
     };
     socket.contestJoinData = contestJoinSnapshot;

@@ -216,6 +216,7 @@ async function processLudoUserTimers() {
               sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
             )
           );
+          await emitGameFinishedToSockets(gameId, matchDataForCompletion, usersToUpdate);
 
           return;
         }
@@ -230,6 +231,7 @@ async function processLudoUserTimers() {
               sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
             )
           );
+          await emitGameFinishedToSockets(gameId, matchDataForCompletion, usersToUpdate);
 
           return;
         }
@@ -248,6 +250,7 @@ async function processLudoUserTimers() {
               sendTimerUpdateToSockets(gameId, matchDataForCompletion, user).catch(() => { })
             )
           );
+          await emitGameFinishedToSockets(gameId, matchDataForCompletion, usersToUpdate);
 
           return;
         }
@@ -277,6 +280,41 @@ async function processLudoUserTimers() {
 async function sendTimerUpdateToSockets(gameId, matchData, user) {
   // Disabled by requirement: do not emit timer events from cron to socket.
   return;
+}
+
+async function emitGameFinishedToSockets(gameId, matchData, users = []) {
+  const emitter = socketIOInstance || buildSocketEmitterAdapter();
+  if (!emitter) return;
+
+  const winnerId = String(matchData?.winner || '');
+  const user1Id = String(matchData?.user1_id || '');
+  const user2Id = String(matchData?.user2_id || '');
+  const completedAt = String(matchData?.completed_at || toISOString());
+  const gameEndReason = String(matchData?.game_end_reason || 'game_completed');
+  const timestamp = toISOString();
+  const targets = Array.isArray(users) ? users : [];
+
+  for (const target of targets) {
+    const socketId = String(target?.socketId || '').trim();
+    const uid = String(target?.userId || '').trim();
+    if (!socketId || !uid) continue;
+
+    const isWinner = winnerId && uid === winnerId;
+    const opponentId = uid === user1Id ? user2Id : user1Id;
+
+    try {
+      emitter.to(socketId).emit(isWinner ? 'game:won' : 'game:lost', {
+        status: isWinner ? 'success' : 'info',
+        game_id: gameId,
+        winner_id: winnerId,
+        loser_id: isWinner ? opponentId : uid,
+        completed_at: completedAt,
+        game_end_reason: gameEndReason,
+        timestamp
+      });
+    } catch (_) {
+    }
+  }
 }
 
 // ============================================================================
