@@ -324,6 +324,11 @@ async function emitGameFinishedToSockets(gameId, matchData, users = []) {
   const user2Id = String(matchData?.user2_id || '');
   const completedAt = String(matchData?.completed_at || toISOString());
   const gameEndReason = String(matchData?.game_end_reason || 'game_completed');
+  const scoreUser1 = Number(matchData?.user1_score || 0);
+  const scoreUser2 = Number(matchData?.user2_score || 0);
+  const winnerIsUser1 = winnerId && winnerId === user1Id;
+  const winnerScore = winnerIsUser1 ? scoreUser1 : scoreUser2;
+  const loserScore = winnerIsUser1 ? scoreUser2 : scoreUser1;
   const timestamp = toISOString();
   const targets = Array.isArray(users) ? users : [];
 
@@ -340,7 +345,7 @@ async function emitGameFinishedToSockets(gameId, matchData, users = []) {
       const winnerProfile = resolveMatchProfile(matchData, winnerId);
       const loserProfile = resolveMatchProfile(matchData, isWinner ? opponentId : uid);
       emitter.to(socketId).emit(eventName, {
-        status: isWinner ? 'success' : 'info',
+        status: 'success',
         game_id: gameId,
         winner_id: winnerId,
         loser_id: isWinner ? opponentId : uid,
@@ -348,6 +353,10 @@ async function emitGameFinishedToSockets(gameId, matchData, users = []) {
         loser_username: loserProfile.username || '',
         winner_profile_data: winnerProfile.profile_data || '',
         loser_profile_data: loserProfile.profile_data || '',
+        winner_score: Number.isFinite(winnerScore) ? winnerScore : 0,
+        loser_score: Number.isFinite(loserScore) ? loserScore : 0,
+        user_score: isWinner ? (Number.isFinite(winnerScore) ? winnerScore : 0) : (Number.isFinite(loserScore) ? loserScore : 0),
+        opponent_score: isWinner ? (Number.isFinite(loserScore) ? loserScore : 0) : (Number.isFinite(winnerScore) ? winnerScore : 0),
         completed_at: completedAt,
         game_end_reason: gameEndReason,
         timestamp

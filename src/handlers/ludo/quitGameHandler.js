@@ -40,6 +40,12 @@ function markQuitEmitGuard(targetSocket, gameId) {
   targetSocket._ludoQuitEmitGuard.add(String(gameId));
 }
 
+function toScore(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return num;
+}
+
 const gameConfig = {
   getMatchKey: (gameId) => REDIS_KEYS.MATCH(gameId),
   emitError,
@@ -170,6 +176,8 @@ async function registerQuitGameHandler(io, socket) {
         userId: user_id,
         opponentId,
         quitAt: new Date().toISOString(),
+        userScore: 0,
+        opponentScore: 0,
         userUsername: String(socket?.user?.username || socket?.user?.contest_join_data?.username || '').trim(),
         userProfile: {
           username: String(socket?.user?.username || socket?.user?.contest_join_data?.username || '').trim(),
@@ -188,6 +196,13 @@ async function registerQuitGameHandler(io, socket) {
           email: String(opponentSocket?.user?.user_email || opponentSocket?.user?.contest_join_data?.user_email || '').trim()
         };
       }
+      const scoreMatchUser1Id = String(match?.user1_id || '').trim();
+      const normalizedActorId = String(user_id || '').trim();
+      const actorIsUser1 = normalizedActorId && normalizedActorId === scoreMatchUser1Id;
+      const scoreUser1 = toScore(match?.user1_score);
+      const scoreUser2 = toScore(match?.user2_score);
+      gameData.userScore = actorIsUser1 ? scoreUser1 : scoreUser2;
+      gameData.opponentScore = actorIsUser1 ? scoreUser2 : scoreUser1;
 
       await updateDatabaseRecords(game_id, opponentId, user_id, contest_id, match, socket);
       stopTimers(io, socket, safeOpponentSocketId, game_id, opponentId, gameData.quitAt);
@@ -207,10 +222,14 @@ async function registerQuitGameHandler(io, socket) {
           winner_username: gameData.opponentUsername || '',
           loser_username: gameData.userUsername || '',
           winner_profile_data: stringifyProfile(gameData.opponentProfile || {}),
-          loser_profile_data: stringifyProfile(gameData.userProfile || {})
+          loser_profile_data: stringifyProfile(gameData.userProfile || {}),
+          winner_score: toScore(gameData.opponentScore),
+          loser_score: toScore(gameData.userScore),
+          user_score: toScore(gameData.opponentScore),
+          opponent_score: toScore(gameData.userScore)
         };
         const loserPayload = {
-          status: 'info',
+          status: 'success',
           game_id: game_id,
           winner_id: opponentId,
           loser_id: user_id,
@@ -220,7 +239,11 @@ async function registerQuitGameHandler(io, socket) {
           winner_username: gameData.opponentUsername || '',
           loser_username: gameData.userUsername || '',
           winner_profile_data: stringifyProfile(gameData.opponentProfile || {}),
-          loser_profile_data: stringifyProfile(gameData.userProfile || {})
+          loser_profile_data: stringifyProfile(gameData.userProfile || {}),
+          winner_score: toScore(gameData.opponentScore),
+          loser_score: toScore(gameData.userScore),
+          user_score: toScore(gameData.userScore),
+          opponent_score: toScore(gameData.opponentScore)
         };
 
         if (safeOpponentSocketId) {

@@ -1037,6 +1037,10 @@ function registerPieceMoveHandler(io, socket) {
               email: String(loserProfileObj.email || '').trim()
             })
             : '';
+          const scoreUser1 = Number(finalMatch?.user1_score || 0);
+          const scoreUser2 = Number(finalMatch?.user2_score || 0);
+          const winnerScore = winnerIsUser1 ? scoreUser1 : scoreUser2;
+          const loserScore = winnerIsUser1 ? scoreUser2 : scoreUser1;
           const finishedPayloadBase = {
             status: 'game_completed',
             game_id: validatedMoveData.game_id,
@@ -1056,6 +1060,10 @@ function registerPieceMoveHandler(io, socket) {
               loser_username: loserUsername,
               winner_profile_data: winnerProfileData,
               loser_profile_data: loserProfileData,
+              winner_score: Number.isFinite(winnerScore) ? winnerScore : 0,
+              loser_score: Number.isFinite(loserScore) ? loserScore : 0,
+              user_score: Number.isFinite(winnerScore) ? winnerScore : 0,
+              opponent_score: Number.isFinite(loserScore) ? loserScore : 0,
               completed_at: winnerInfo.timestamp,
               game_end_reason: 'all_pieces_home',
               timestamp: new Date().toISOString()
@@ -1082,7 +1090,7 @@ function registerPieceMoveHandler(io, socket) {
           if (opponentSocketId) {
             try {
               io.to(opponentSocketId).emit('game:lost', {
-                status: 'info',
+                status: 'success',
                 message: '😔 Game Over! Your opponent has won the game.',
                 game_id: validatedMoveData.game_id,
                 winner_id: user.user_id,
@@ -1091,6 +1099,10 @@ function registerPieceMoveHandler(io, socket) {
                 loser_username: loserUsername,
                 winner_profile_data: winnerProfileData,
                 loser_profile_data: loserProfileData,
+                winner_score: Number.isFinite(winnerScore) ? winnerScore : 0,
+                loser_score: Number.isFinite(loserScore) ? loserScore : 0,
+                user_score: Number.isFinite(loserScore) ? loserScore : 0,
+                opponent_score: Number.isFinite(winnerScore) ? winnerScore : 0,
                 completed_at: winnerInfo.timestamp,
                 game_end_reason: 'all_pieces_home',
                 timestamp: new Date().toISOString()
@@ -1106,7 +1118,7 @@ function registerPieceMoveHandler(io, socket) {
           if (!opponentSocketId) {
             try {
               io.in(validatedMoveData.game_id).emit('game:lost', {
-                status: 'info',
+                status: 'success',
                 message: '😔 Game Over! Your opponent has won the game.',
                 game_id: validatedMoveData.game_id,
                 winner_id: user.user_id,
@@ -1115,6 +1127,10 @@ function registerPieceMoveHandler(io, socket) {
                 loser_username: loserUsername,
                 winner_profile_data: winnerProfileData,
                 loser_profile_data: loserProfileData,
+                winner_score: Number.isFinite(winnerScore) ? winnerScore : 0,
+                loser_score: Number.isFinite(loserScore) ? loserScore : 0,
+                user_score: Number.isFinite(loserScore) ? loserScore : 0,
+                opponent_score: Number.isFinite(winnerScore) ? winnerScore : 0,
                 completed_at: winnerInfo.timestamp,
                 game_end_reason: 'all_pieces_home',
                 timestamp: new Date().toISOString()

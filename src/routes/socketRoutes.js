@@ -28,6 +28,11 @@ function normalize(value) {
   return String(value).trim();
 }
 
+function toNumberOrZero(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
 function isCompletedStatus(status) {
   return normalize(status).toLowerCase() === 'completed';
 }
@@ -105,11 +110,22 @@ async function emitLudoFinishIfNeeded(socket) {
     socket?.contestJoinData?.username ||
     ''
   );
+  const user1Id = normalize(row.user_id);
+  const opponentId = normalize(row.opponent_user_id);
+  const scoreUser1 = toNumberOrZero(row.user1_score);
+  const scoreUser2 = toNumberOrZero(row.user2_score);
+  const winnerIsUser1 = winnerId && winnerId === user1Id;
+  const winnerScore = winnerIsUser1 ? scoreUser1 : scoreUser2;
+  const loserScore = winnerIsUser1 ? scoreUser2 : scoreUser1;
   const payload = {
-    status: isWinner ? 'success' : 'info',
+    status: 'success',
     game_id: matchId,
     winner_id: winnerId,
-    loser_id: isWinner ? normalize(row.opponent_user_id) : userId,
+    loser_id: isWinner ? opponentId : userId,
+    winner_score: winnerScore,
+    loser_score: loserScore,
+    user_score: isWinner ? winnerScore : loserScore,
+    opponent_score: isWinner ? loserScore : winnerScore,
     completed_at: normalize(row.ended_at || row.updated_at || new Date().toISOString()),
     game_end_reason: 'game_completed',
     timestamp: new Date().toISOString(),

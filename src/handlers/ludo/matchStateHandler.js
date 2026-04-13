@@ -1,5 +1,6 @@
 const withAuth = require('../../middleware/withAuth');
 const { redis: redisClient } = require('../../utils/redis');
+const mysqlClient = require('../../services/mysql/client');
 const { validateRequiredFields, emitStandardError, safeParseRedisData } = require('../../utils/gameUtils');
 const { GAME_CONFIG } = require('../../config/gameConfig');
 const { REDIS_KEYS } = require('../../constants');
@@ -77,6 +78,61 @@ async function getContestJoinSnapshotFromRedis(userId, contestId, lId) {
   }
 
   return null;
+}
+
+async function getMatchStateFromDb(gameId, userId) {
+  const gid = normalizeId(gameId);
+  const uid = normalizeId(userId);
+  if (!gid || !uid) return null;
+
+  try {
+    const [rows] = await mysqlClient.execute(
+      `
+        SELECT
+          match_id,
+          user_id,
+          opponent_user_id,
+          status,
+          turn_id,
+          winner_user_id,
+          contest_type,
+          started_at,
+          updated_at,
+          ended_at,
+          last_move_at
+        FROM ludo_game
+        WHERE match_id = ? AND is_deleted = 0 AND (user_id = ? OR opponent_user_id = ?)
+        ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, updated_at DESC
+        LIMIT 1
+      `,
+      [gid, uid, uid, uid]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      game_id: normalizeId(row.match_id || gid),
+      user1_id: normalizeId(row.user_id || ''),
+      user2_id: normalizeId(row.opponent_user_id || ''),
+      turn: normalizeId(row.turn_id || ''),
+      status: normalizeId(row.status || 'active') || 'active',
+      winner: normalizeId(row.winner_user_id || ''),
+      contest_type: normalizeId(row.contest_type || ''),
+      game_type: 'ludo',
+      user1_pieces: [],
+      user2_pieces: [],
+      user1_score: 0,
+      user2_score: 0,
+      user1_chance: 0,
+      user2_chance: 0,
+      user1_time: null,
+      user2_time: null,
+      start_time: row.started_at || null,
+      updated_at: row.updated_at || row.last_move_at || row.ended_at || null
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
 function profileFromSnapshot(snapshot = null) {
@@ -226,11 +282,10 @@ function registerMatchStateHandler(io, socket) {
         }
 
         const matchRaw = await redisClient.get(REDIS_KEYS.MATCH(gameId));
-        if (!matchRaw) {
-          socket.emit(EVENTS.RESPONSE, buildPendingMatchStateResponse(userId, contestId, lId, selfProfile));
-          return;
+        let match = safeParseRedisData(matchRaw);
+        if (!match || typeof match !== 'object') {
+          match = await getMatchStateFromDb(gameId, userId);
         }
-        const match = safeParseRedisData(matchRaw);
         if (!match) {
           socket.emit(EVENTS.RESPONSE, buildPendingMatchStateResponse(userId, contestId, lId, selfProfile));
           return;

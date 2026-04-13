@@ -2045,7 +2045,7 @@ You already have scripts for this in `package.json`:
 ```bash
 npm run start:server   # starts src/server.js with --no-cron
 npm run start:cron     # starts src/cron-worker.js
-npm run start:admin
+npm run start:admin    # starts src/admin-worker.js 
 npm run mock:apis
 ```
 
